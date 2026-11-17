@@ -30,3 +30,6 @@ tmp/
 *.iml
 .idea/
 .vscode/
+
+# Local RTSP publisher PIDs and runtime logs
+rig/run/
