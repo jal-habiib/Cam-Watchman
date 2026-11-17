@@ -33,3 +33,10 @@ tmp/
 
 # Local RTSP publisher PIDs and runtime logs
 rig/run/
+
+
+# Private local integration notes and agent handoffs (do not publish)
+INTEGRATION_LOG.md
+REMAINING_WORK_ALLOCATION.md
+CHATGPT_TO_DEEPSEEK_*.md
+docs/INSTALLER_OPTIONS.md
