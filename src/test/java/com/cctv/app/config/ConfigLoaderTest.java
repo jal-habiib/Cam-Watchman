@@ -25,14 +25,14 @@ class ConfigLoaderTest {
             # comment
             cameras.1.id=1
             cameras.1.name=Front gate
-            cameras.1.url=rtsp://user:secret@127.0.0.1:554/Streaming/Channels/101
-            cameras.1.substream_url=rtsp://user:secret@127.0.0.1:554/Streaming/Channels/102
+            cameras.1.url=rtsp://user:secret@203.0.113.64:554/Streaming/Channels/101
+            cameras.1.substream_url=rtsp://user:secret@203.0.113.64:554/Streaming/Channels/102
             cameras.1.record=true
             cameras.1.ai=true
 
             cameras.2.id=2
             cameras.2.name=Corridor
-            cameras.2.substream_url=rtsp://127.0.0.1:554/sub
+            cameras.2.substream_url=rtsp://203.0.113.65:554/sub
             cameras.2.record=false
             cameras.2.ai=false
             """;
@@ -52,7 +52,7 @@ class ConfigLoaderTest {
         assertEquals("Front gate", cfg.cameras().get(0).name());
         assertTrue(cfg.cameras().get(0).needsMainStream());
         assertFalse(cfg.cameras().get(1).needsMainStream());
-        assertEquals("rtsp://127.0.0.1:554/sub", cfg.cameras().get(1).displayUrl().toString());
+        assertEquals("rtsp://203.0.113.65:554/sub", cfg.cameras().get(1).displayUrl().toString());
 
         assertEquals(ConfigLoader.DEFAULT_SEGMENT_SECONDS, cfg.segmentSeconds());
         assertEquals(ConfigLoader.DEFAULT_RETENTION_DAYS, cfg.retentionDays());
@@ -90,7 +90,7 @@ class ConfigLoaderTest {
         String text = VALID + """
                 cameras.3.id=1
                 cameras.3.name=Duplicate
-                cameras.3.substream_url=rtsp://127.0.0.1/sub
+                cameras.3.substream_url=rtsp://203.0.113.9/sub
                 """;
         ConfigException ex = assertThrows(ConfigException.class, () -> parse(text));
         assertTrue(ex.problems().stream().anyMatch(p -> p.contains("duplicate camera id 1")), ex.getMessage());
@@ -113,7 +113,7 @@ class ConfigLoaderTest {
     void rejectsAiCameraWithoutMainStream() {
         String text = """
                 cameras.1.name=AI on substream only
-                cameras.1.substream_url=rtsp://127.0.0.1/sub
+                cameras.1.substream_url=rtsp://203.0.113.5/sub
                 cameras.1.ai=true
                 """;
         ConfigException ex = assertThrows(ConfigException.class, () -> parse(text));
@@ -143,8 +143,8 @@ class ConfigLoaderTest {
 
     @Test
     void redactionMasksCredentialsButKeepsHostAndPath() {
-        assertEquals("rtsp://***@127.0.0.1:554/Streaming/Channels/101",
-                Redaction.redact("rtsp://admin:hunter2@127.0.0.1:554/Streaming/Channels/101"));
+        assertEquals("rtsp://***@203.0.113.64:554/Streaming/Channels/101",
+                Redaction.redact("rtsp://admin:hunter2@203.0.113.64:554/Streaming/Channels/101"));
         assertEquals("rtsp://***@cam.local/live",
                 Redaction.redact("rtsp://user@cam.local/live"));
         assertEquals("https://example.com/x?password=***&y=2",
@@ -157,7 +157,7 @@ class ConfigLoaderTest {
     void cameraDefaultsAndDisplayUrlFallback() throws IOException {
         AppConfig cfg = parse("""
                 cameras.1.name=Main only
-                cameras.1.url=rtsp://127.0.0.1/main
+                cameras.1.url=rtsp://203.0.113.2/main
                 """);
         CameraConfig cam = cfg.cameras().get(0);
         assertTrue(cam.hasMain());
