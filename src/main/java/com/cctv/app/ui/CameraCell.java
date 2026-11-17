@@ -120,7 +120,7 @@ public final class CameraCell extends BorderPane {
     }
 
     /**
-     * Replaces the placeholder with a live video surface (Phase 6: the VLCJ cell for a
+     * Replaces the placeholder with a live video surface (the FFmpeg display cell for a
      * display-only camera). Must be called on the FX thread.
      */
     public void setVideo(javafx.scene.Node video) {

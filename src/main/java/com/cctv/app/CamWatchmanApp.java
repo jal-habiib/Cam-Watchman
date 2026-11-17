@@ -25,8 +25,7 @@ import com.cctv.app.ui.CountsView;
 import com.cctv.app.ui.LineEditor;
 import com.cctv.app.ui.ZoneEditor;
 import com.cctv.app.video.EngineVideoView;
-import com.cctv.app.video.VlcjRuntime;
-import com.cctv.app.video.VlcjVideoView;
+import com.cctv.app.video.FfmpegDisplayView;
 import com.cctv.contract.Detection;
 import com.cctv.contract.EventBus;
 import com.cctv.contract.IntrusionEvent;
@@ -92,8 +91,8 @@ public final class CamWatchmanApp extends Application {
 
     private final SimpleEventBus bus = new SimpleEventBus();
     private final Map<Long, CameraCell> cells = new LinkedHashMap<>();
-    private final List<VlcjVideoView> videoViews = new ArrayList<>();
-    private final Map<Long, VlcjVideoView> videoByCamera = new LinkedHashMap<>();
+    private final List<FfmpegDisplayView> videoViews = new ArrayList<>();
+    private final Map<Long, FfmpegDisplayView> videoByCamera = new LinkedHashMap<>();
     private final List<CameraCell> cellOrder = new ArrayList<>();
     private GridPane wallGrid;
     private BorderPane root;
@@ -169,8 +168,8 @@ public final class CamWatchmanApp extends Application {
         });
         primaryStage.show();
 
-        // Display-only cameras: one VLCJ callback surface each, started after the window exists.
-        for (VlcjVideoView video : videoViews) {
+        // Display-only FFmpeg decoders start after the wall is visible.
+        for (FfmpegDisplayView video : videoViews) {
             video.start();
         }
         if (engineView != null) {
@@ -461,7 +460,7 @@ public final class CamWatchmanApp extends Application {
     }
 
     /**
-     * Rebuilds the wall after a camera change: closes the live viewers (VLCJ players and the engine
+     * Rebuilds the wall after a camera change: closes the live viewers (FFmpeg display workers and the engine
      * display tap) before the old camera list is forgotten, then starts only what the new list
      * enables. Recording history in SQLite is untouched.
      */
@@ -471,7 +470,7 @@ public final class CamWatchmanApp extends Application {
         }
         EngineHandle previous = pipeline;
         pipeline = null;
-        for (VlcjVideoView video : videoViews) {
+        for (FfmpegDisplayView video : videoViews) {
             video.close();
         }
         videoViews.clear();
@@ -495,7 +494,7 @@ public final class CamWatchmanApp extends Application {
         }
         refreshActiveCameras();
         wallStack.getChildren().set(0, wall());
-        for (VlcjVideoView video : videoViews) {
+        for (FfmpegDisplayView video : videoViews) {
             video.start();
         }
         if (engineView != null) {
@@ -532,8 +531,8 @@ public final class CamWatchmanApp extends Application {
             CameraCell cell = new CameraCell(camera);
             cells.put(camera.id(), cell);
             if (camera.hasSubstream() && !camera.hasMain()) {
-                // Phase 6a: cameras 2-4 are display-only VLCJ cells on their substream.
-                VlcjVideoView video = new VlcjVideoView(camera.id(), camera.substreamUrl(), bus::publish);
+                // Display-only cameras decode their substreams through the bundled FFmpeg runtime.
+                FfmpegDisplayView video = new FfmpegDisplayView(camera.id(), camera.substreamUrl(), bus::publish);
                 cell.setVideo(video);
                 videoViews.add(video);
                 videoByCamera.put(camera.id(), video);
@@ -604,7 +603,7 @@ public final class CamWatchmanApp extends Application {
             return;
         }
         BufferedImage frame = null;
-        VlcjVideoView view = videoByCamera.get(camera.id());
+        FfmpegDisplayView view = videoByCamera.get(camera.id());
         if (view != null) {
             frame = view.snapshotImage().orElse(null);
         }
@@ -651,7 +650,7 @@ public final class CamWatchmanApp extends Application {
             return;
         }
         BufferedImage frame = null;
-        VlcjVideoView view = videoByCamera.get(camera.id());
+        FfmpegDisplayView view = videoByCamera.get(camera.id());
         if (view != null) {
             frame = view.snapshotImage().orElse(null);
         }
@@ -764,12 +763,12 @@ public final class CamWatchmanApp extends Application {
      * Opens the single-writer database, runs the startup reconciliation and schedules the
      * retention sweep (plan 3c). All of it happens off the JavaFX thread.
      */
-    /** Newest frame for one camera, used as the intrusion snapshot (engine tap or VLCJ cell). */
+    /** Newest frame for one camera, used as the intrusion snapshot (engine tap or FFmpeg display cell). */
     private java.awt.image.BufferedImage snapshotForCamera(long cameraId) {
         if (cameraId == engineCameraId && engineView != null) {
             return engineView.snapshot().orElse(null);
         }
-        VlcjVideoView view = videoByCamera.get(cameraId);
+        FfmpegDisplayView view = videoByCamera.get(cameraId);
         return view == null ? null : view.snapshotImage().orElse(null);
     }
 
@@ -1097,7 +1096,18 @@ public final class CamWatchmanApp extends Application {
             return;
         }
         CameraConfig target = camera;
-        Path model = Path.of(System.getProperty("cctv.model", "models/yolo11n.onnx")).toAbsolutePath();
+        Path model;
+        try {
+            model = com.cctv.ai.ModelPathResolver.resolve(System.getProperty("cctv.model"),
+                    Path.of(CamWatchmanApp.class.getProtectionDomain().getCodeSource()
+                            .getLocation().toURI()),
+                    Path.of(System.getProperty("user.dir")));
+        } catch (Exception resolutionFailure) {
+            log.error("could not resolve bundled AI model: {}", resolutionFailure.toString());
+            bus.publish(StreamStatusEvent.now(target.id(), StreamState.ERROR,
+                    "AI model unavailable: " + resolutionFailure.getClass().getSimpleName()));
+            return;
+        }
         engineStart = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "engine-start");
             thread.setDaemon(true);
@@ -1175,11 +1185,10 @@ public final class CamWatchmanApp extends Application {
         if (detectionOverlay != null) {
             detectionOverlay.close();
         }
-        for (VlcjVideoView video : videoViews) {
+        for (FfmpegDisplayView video : videoViews) {
             video.close();
         }
         videoViews.clear();
-        VlcjRuntime.release();
         if (storageScheduler != null) {
             storageScheduler.shutdownNow();
         }

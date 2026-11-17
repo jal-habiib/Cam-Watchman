@@ -15,7 +15,6 @@
     <javafx.version>21.0.2</javafx.version>
     <javacv.version>1.5.14</javacv.version>
     <onnxruntime.version>1.32.0</onnxruntime.version>
-    <vlcj.version>4.12.1</vlcj.version>
     <sqlite.version>3.54.1.0</sqlite.version>
     <slf4j.version>2.0.17</slf4j.version>
     <logback.version>1.5.38</logback.version>
@@ -76,13 +75,6 @@
       <groupId>com.microsoft.onnxruntime</groupId>
       <artifactId>onnxruntime</artifactId>
       <version>${onnxruntime.version}</version>
-    </dependency>
-
-    <!-- Display-only cameras 2..4 -->
-    <dependency>
-      <groupId>uk.co.caprica</groupId>
-      <artifactId>vlcj</artifactId>
-      <version>${vlcj.version}</version>
     </dependency>
 
     <!-- Persistence -->
