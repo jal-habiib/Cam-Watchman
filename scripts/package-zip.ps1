@@ -95,19 +95,16 @@ if (-not (Test-Path (Join-Path $source 'CamWatchman.exe'))) {
 }
 
 New-Item -ItemType Directory -Force $target | Out-Null
-# First run only: create a harmless setup placeholder. Never replace an existing camera config.
+# First run only: create a commented config with no camera yet. Never replace an existing camera config.
 $dataDir = Join-Path $env:LOCALAPPDATA 'CamWatchman'
 New-Item -ItemType Directory -Force $dataDir | Out-Null
 $config = Join-Path $dataDir 'cameras.properties'
 if (-not (Test-Path $config)) {
     $initialConfig = @(
-        '# First run: open Manage Cameras and replace this setup placeholder.'
-        'cameras.1.id=1'
-        'cameras.1.name=Setup required - add your camera'
-        'cameras.1.url=rtsp://127.0.0.1:8554/SETUP_REQUIRED'
-        'cameras.1.substream_url='
-        'cameras.1.record=false'
-        'cameras.1.ai=false'
+        '# Cam Watchman first run: no camera configured yet.'
+        '# Add your camera in the app:  Cameras (header) -> + Add camera, then paste its RTSP URL.'
+        '# The app opens the camera manager automatically when no camera is set up.'
+        '# RTSP URL format:  rtsp://[username:password@]camera-ip:port/stream-path'
         'base.data.dir='
         'recording.segment.seconds=15'
         'retention.days=7'

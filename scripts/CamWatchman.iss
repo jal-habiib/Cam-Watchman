@@ -63,13 +63,10 @@ begin
     if not FileExists(ConfigFile) then
     begin
       InitialConfig :=
-        '# First run: open Manage Cameras and replace this setup placeholder.' + #13#10 +
-        'cameras.1.id=1' + #13#10 +
-        'cameras.1.name=Setup required - add your camera' + #13#10 +
-        'cameras.1.url=rtsp://127.0.0.1:8554/SETUP_REQUIRED' + #13#10 +
-        'cameras.1.substream_url=' + #13#10 +
-        'cameras.1.record=false' + #13#10 +
-        'cameras.1.ai=false' + #13#10 +
+        '# Cam Watchman first run: no camera configured yet.' + #13#10 +
+        '# Add your camera in the app:  Cameras (header) -> + Add camera, then paste its RTSP URL.' + #13#10 +
+        '# The app opens the camera manager automatically when no camera is set up.' + #13#10 +
+        '# RTSP URL format:  rtsp://[username:password@]camera-ip:port/stream-path' + #13#10 +
         'base.data.dir=' + #13#10 +
         'recording.segment.seconds=15' + #13#10 +
         'retention.days=7' + #13#10 +

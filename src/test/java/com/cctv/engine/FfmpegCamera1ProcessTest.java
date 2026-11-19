@@ -16,27 +16,38 @@ class FfmpegCamera1ProcessTest {
     Path tempDir;
 
     @Test
-    void rejectsCredentialBearingRtspUrlBeforeStartingAProcess() {
+    void acceptsDirectCameraUrlWithCredentials() {
         SimpleEventBus bus = new SimpleEventBus();
 
-        assertThrows(IllegalArgumentException.class, () ->
-                new FfmpegCamera1Process(1,
-                        "rtsp://camera-user:secret@127.0.0.1:8554/cam1",
-                        tempDir, 10, 1.0, bus));
+        FfmpegCamera1Process source = new FfmpegCamera1Process(1,
+                "rtsp://camera-user:secret@192.168.1.50:554/stream1",
+                tempDir, 10, 1.0, bus);
 
+        assertEquals(1, bus.listenerCount());
+        assertDoesNotThrow(source::close);
         assertEquals(0, bus.listenerCount());
     }
 
     @Test
-    void rejectsRemoteRtspUrlAndQueryTokens() {
+    void acceptsRemoteCameraUrl() {
+        SimpleEventBus bus = new SimpleEventBus();
+
+        FfmpegCamera1Process source = new FfmpegCamera1Process(1,
+                "rtsp://203.0.113.20:554/stream", tempDir, 10, 1.0, bus);
+
+        assertEquals(1, bus.listenerCount());
+        assertDoesNotThrow(source::close);
+    }
+
+    @Test
+    void rejectsNonRtspAndHostlessUrls() {
         SimpleEventBus bus = new SimpleEventBus();
 
         assertThrows(IllegalArgumentException.class, () ->
-                new FfmpegCamera1Process(1, "rtsp://203.0.113.20:554/stream",
+                new FfmpegCamera1Process(1, "http://192.168.1.50:554/stream",
                         tempDir, 10, 1.0, bus));
         assertThrows(IllegalArgumentException.class, () ->
-                new FfmpegCamera1Process(1, "rtsp://127.0.0.1:8554/cam1?token=secret",
-                        tempDir, 10, 1.0, bus));
+                new FfmpegCamera1Process(1, "rtsp:///stream", tempDir, 10, 1.0, bus));
 
         assertEquals(0, bus.listenerCount());
     }
@@ -52,4 +63,3 @@ class FfmpegCamera1ProcessTest {
         assertEquals(0, bus.listenerCount());
     }
 }
-

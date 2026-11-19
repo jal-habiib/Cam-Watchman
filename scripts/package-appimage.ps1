@@ -68,6 +68,20 @@ try {
     Copy-Item "models\yolo11n.onnx" (Join-Path $app "models") -Force
     Copy-Item "cameras.properties.example" $app -Force
 
+    # Optional: bundle a static ffmpeg.exe so the image runs without a machine-wide install.
+    $ffmpegSource = Join-Path $root "tools\ffmpeg\ffmpeg.exe"
+    if (-not (Test-Path $ffmpegSource)) {
+        $onPath = Get-Command ffmpeg -ErrorAction SilentlyContinue
+        if ($onPath) { $ffmpegSource = $onPath.Source }
+    }
+    if (Test-Path $ffmpegSource) {
+        New-Item -ItemType Directory -Force (Join-Path $app "ffmpeg") | Out-Null
+        Copy-Item $ffmpegSource (Join-Path $app "ffmpeg\ffmpeg.exe") -Force
+        Write-Host "[package] bundled ffmpeg from $ffmpegSource"
+    } else {
+        Write-Host "[package] WARNING: no ffmpeg found; put a static tools\ffmpeg\ffmpeg.exe here to bundle it"
+    }
+
     # Smoke runs inside the app-image write cameras.properties and tmp\ data next to the launcher.
     # A distributable image must never contain those, so scrub user artifacts after every build.
     $userArtifacts = @("cameras.properties", "tmp", "data", "recordings", "snapshots", "logs")

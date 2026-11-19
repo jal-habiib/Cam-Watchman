@@ -1,5 +1,6 @@
 package com.cctv.engine;
 
+import com.cctv.app.util.FfmpegBinary;
 import com.cctv.contract.ClipFinalized;
 import com.cctv.contract.EventBus;
 import com.cctv.contract.Frame;
@@ -39,10 +40,11 @@ import java.util.regex.Pattern;
  * One-process Camera 1 owner: FFmpeg opens the main RTSP input once, packet-copies it into
  * MKV segments, and decodes a low-rate 640x360 BGR output for the AI consumer.
  *
- * <p>FFmpeg must be available on PATH (the project's rig scripts already require it).
- * Only credential-free loopback RTSP URLs are accepted because command-line arguments may be
- * visible to local process inspection; remote camera credentials must be held by a local RTSP
- * relay (for example MediaMTX), not passed to this child process.
+ * <p>FFmpeg is resolved by {@link com.cctv.app.util.FfmpegBinary} (bundled copy first, then PATH).
+ * The main RTSP URL may point straight at a camera (including user:password credentials) or at a
+ * local relay. Credentials in the URL are visible to local process inspection, just as they are
+ * already stored in the runtime database; owners who need to hide them should keep theirs in a
+ * local relay such as MediaMTX.
  * The stdout reader continuously drains raw frames into a one-slot handoff, so slow inference
  * cannot back-pressure the recorder. Segment CSV entries are emitted only after a segment closes.
  */
@@ -83,11 +85,8 @@ public final class FfmpegCamera1Process implements FrameSource {
         }
         URI sourceUri = URI.create(rtspUrl);
         String host = sourceUri.getHost();
-        boolean loopback = host != null && (host.equalsIgnoreCase("localhost")
-                || host.equals("127.0.0.1") || host.equals("::1"));
-        if (!loopback || sourceUri.getUserInfo() != null || sourceUri.getRawQuery() != null) {
-            throw new IllegalArgumentException("FFmpeg process capture accepts only a credential-free "
-                    + "loopback RTSP relay URL; direct camera credentials can be exposed in process arguments");
+        if (host == null || host.isBlank()) {
+            throw new IllegalArgumentException("main stream URL has no host");
         }
         this.cameraId = cameraId;
         this.rtspUrl = rtspUrl;
@@ -181,7 +180,7 @@ public final class FfmpegCamera1Process implements FrameSource {
                 .toString();
 
         List<String> command = new ArrayList<>(List.of(
-                "ffmpeg", "-hide_banner", "-loglevel", "info",
+                FfmpegBinary.resolve(), "-hide_banner", "-loglevel", "info",
                 "-rtsp_transport", "tcp", "-timeout", "5000000",
                 "-i", rtspUrl,
                 "-map", "0:v:0", "-an", "-c:v", "copy",

@@ -1,10 +1,18 @@
 package com.cctv.app.video;
 
+import com.cctv.app.util.FfmpegBinary;
 import com.cctv.contract.StreamState;
 import com.cctv.contract.StreamStatusEvent;
 import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferByte;
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
@@ -13,19 +21,27 @@ import javafx.scene.image.ImageView;
 import javafx.scene.image.PixelFormat;
 import javafx.scene.image.WritableImage;
 import javafx.scene.layout.Pane;
-import org.bytedeco.javacv.FFmpegFrameGrabber;
-import org.bytedeco.javacv.Java2DFrameConverter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * FFmpeg/JavaCV display-only RTSP surface for cameras without the full AI/record pipeline.
- * Decoding happens on a dedicated daemon worker; only the newest completed image is copied
- * into JavaFX on the application thread. RTSP is forced over TCP and retries use bounded backoff.
+ * FFmpeg display-only RTSP surface for cameras without the full AI/record pipeline.
+ * A dedicated FFmpeg child process decodes the RTSP stream to raw BGR24 frames on stdout;
+ * only the newest completed image is copied into JavaFX on the application thread.
+ * RTSP is forced over TCP and retries use bounded backoff.
+ *
+ * <p>This deliberately spawns the external {@code ffmpeg} executable (exactly as the Camera 1
+ * pipeline does in {@code com.cctv.engine.FfmpegCamera1Process}) instead of JavaCV's
+ * {@code FFmpegFrameGrabber}: the bundled JavaCV FFmpeg build cannot open MediaMTX's RTSP relays
+ * ({@code avformat_open_input() error -875574520}, then hangs), while the external ffmpeg binary
+ * (see {@link com.cctv.app.util.FfmpegBinary}) opens the same streams immediately.
  */
 public final class FfmpegDisplayView extends Pane implements AutoCloseable {
 
     private static final Logger log = LoggerFactory.getLogger(FfmpegDisplayView.class);
+    private static final int DISPLAY_WIDTH = 640;
+    private static final int DISPLAY_HEIGHT = 360;
+    private static final int FRAME_BYTES = DISPLAY_WIDTH * DISPLAY_HEIGHT * 3;
     private static final long FRAME_STALE_NANOS = 10_000_000_000L;
     private static final long MIN_RETRY_MS = 1_000L;
     private static final long MAX_RETRY_MS = 15_000L;
@@ -38,7 +54,7 @@ public final class FfmpegDisplayView extends Pane implements AutoCloseable {
     private final AtomicLong receivedFrames = new AtomicLong();
     private final AnimationTimer painter;
 
-    private volatile FFmpegFrameGrabber activeGrabber;
+    private volatile Process process;
     private volatile Thread worker;
     private volatile boolean closed;
     private volatile boolean started;
@@ -83,39 +99,9 @@ public final class FfmpegDisplayView extends Pane implements AutoCloseable {
     private void decodeLoop() {
         long retryMs = MIN_RETRY_MS;
         while (!closed) {
-            FFmpegFrameGrabber grabber = null;
-            Java2DFrameConverter converter = new Java2DFrameConverter();
             try {
-                grabber = new FFmpegFrameGrabber(url);
-                grabber.setOption("rtsp_transport", "tcp");
-                grabber.setOption("rw_timeout", "5000000");
-                grabber.setOption("threads", "1");
-                activeGrabber = grabber;
-                grabber.start();
-                log.info("camera {} FFmpeg display decoder connected ({}x{}, RTSP/TCP, {})",
-                        cameraId, grabber.getImageWidth(), grabber.getImageHeight(),
-                        com.cctv.app.config.Redaction.redact(url));
+                runOneSession();
                 retryMs = MIN_RETRY_MS;
-
-                while (!closed) {
-                    org.bytedeco.javacv.Frame frame = grabber.grabImage();
-                    if (frame == null) {
-                        continue;
-                    }
-                    BufferedImage converted = converter.convert(frame);
-                    if (converted == null) {
-                        continue;
-                    }
-                    latest.set(converted);
-                    lastFrameNanos = System.nanoTime();
-                    receivedFrames.incrementAndGet();
-                    if (!online) {
-                        online = true;
-                        publish(StreamState.ONLINE, "Receiving decoded video frames");
-                        log.info("camera {} FFmpeg display received first frame: {}x{}",
-                                cameraId, converted.getWidth(), converted.getHeight());
-                    }
-                }
             } catch (Exception failure) {
                 if (!closed) {
                     online = false;
@@ -124,23 +110,6 @@ public final class FfmpegDisplayView extends Pane implements AutoCloseable {
                             cameraId, com.cctv.app.config.Redaction.redact(url),
                             safeMessage(failure));
                 }
-            } finally {
-                activeGrabber = null;
-                if (grabber != null) {
-                    try {
-                        grabber.stop();
-                    } catch (Exception stopFailure) {
-                        log.debug("camera {} display grabber stop: {}", cameraId,
-                                safeMessage(stopFailure));
-                    }
-                    try {
-                        grabber.release();
-                    } catch (Exception releaseFailure) {
-                        log.debug("camera {} display grabber release: {}", cameraId,
-                                safeMessage(releaseFailure));
-                    }
-                }
-                converter.close();
             }
             if (!closed) {
                 sleep(retryMs);
@@ -151,6 +120,78 @@ public final class FfmpegDisplayView extends Pane implements AutoCloseable {
         publish(StreamState.OFFLINE, "Display stream stopped");
         log.info("camera {} FFmpeg display worker stopped after {} frame(s)",
                 cameraId, receivedFrames.get());
+    }
+
+    private void runOneSession() throws Exception {
+        List<String> command = List.of(
+                FfmpegBinary.resolve(), "-hide_banner", "-nostats", "-loglevel", "warning",
+                "-rtsp_transport", "tcp", "-timeout", "5000000",
+                "-i", url,
+                "-map", "0:v:0", "-an",
+                "-vf", "scale=640:360:force_original_aspect_ratio=decrease,"
+                        + "pad=640:360:(ow-iw)/2:(oh-ih)/2",
+                "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"
+        );
+
+        Process child = new ProcessBuilder(command).start();
+        process = child;
+        if (closed) {
+            requestStop(child);
+            return;
+        }
+
+        Thread stderrDrain = new Thread(() -> drainStderr(child),
+                "camera-" + cameraId + "-display-ffmpeg-stderr");
+        stderrDrain.setDaemon(true);
+        stderrDrain.start();
+
+        readFrames(child);
+
+        int exit = child.waitFor();
+        process = null;
+        if (!closed && exit != 0) {
+            throw new IllegalStateException("FFmpeg exited with code " + exit);
+        }
+    }
+
+    private void readFrames(Process child) throws Exception {
+        try (InputStream raw = child.getInputStream()) {
+            byte[] bytes = new byte[FRAME_BYTES];
+            while (!closed) {
+                int offset = 0;
+                while (offset < FRAME_BYTES) {
+                    int count = raw.read(bytes, offset, FRAME_BYTES - offset);
+                    if (count < 0) {
+                        return;
+                    }
+                    offset += count;
+                }
+                BufferedImage converted = new BufferedImage(DISPLAY_WIDTH, DISPLAY_HEIGHT,
+                        BufferedImage.TYPE_3BYTE_BGR);
+                byte[] target = ((DataBufferByte) converted.getRaster().getDataBuffer()).getData();
+                System.arraycopy(bytes, 0, target, 0, FRAME_BYTES);
+                latest.set(converted);
+                lastFrameNanos = System.nanoTime();
+                receivedFrames.incrementAndGet();
+                if (!online) {
+                    online = true;
+                    publish(StreamState.ONLINE, "Receiving decoded video frames");
+                    log.info("camera {} FFmpeg display received first frame: {}x{}",
+                            cameraId, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+                }
+            }
+        }
+    }
+
+    private void drainStderr(Process child) {
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(child.getErrorStream(), StandardCharsets.UTF_8))) {
+            while (reader.readLine() != null) {
+                // drained to keep the pipe from filling; already quieted with -loglevel warning
+            }
+        } catch (Exception ignored) {
+            // process teardown
+        }
     }
 
     private void paint(long now) {
@@ -214,6 +255,7 @@ public final class FfmpegDisplayView extends Pane implements AutoCloseable {
         }
         closed = true;
         painter.stop();
+        requestStop(process);
         Thread thread = worker;
         if (thread != null) {
             thread.interrupt();
@@ -226,6 +268,22 @@ public final class FfmpegDisplayView extends Pane implements AutoCloseable {
     private void publish(StreamState state, String detail) {
         if (publisher != null) {
             publisher.accept(StreamStatusEvent.now(cameraId, state, detail));
+        }
+    }
+
+    private void requestStop(Process child) {
+        if (child == null || !child.isAlive()) {
+            return;
+        }
+        try {
+            child.getOutputStream().write("q\n".getBytes(StandardCharsets.US_ASCII));
+            child.getOutputStream().flush();
+            if (!child.waitFor(5, TimeUnit.SECONDS)) {
+                child.destroyForcibly();
+                child.waitFor(3, TimeUnit.SECONDS);
+            }
+        } catch (Exception failure) {
+            child.destroyForcibly();
         }
     }
 

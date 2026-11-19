@@ -12,7 +12,7 @@ import java.util.List;
  *
  * @param configFile            file the values came from (for log messages only)
  * @param baseDataDir           root of all runtime data (recordings, DB, logs, snapshots)
- * @param cameras               validated cameras, ordered by id, never empty
+ * @param cameras               validated cameras, ordered by id; empty before the user adds one
  * @param segmentSeconds        MKV segment length, plan range 10–30 s
  * @param retentionDays         delete kept clips older than this
  * @param retentionMaxBytes     total recordings cap in bytes
@@ -30,9 +30,8 @@ public record AppConfig(Path configFile,
 
     public AppConfig {
         cameras = List.copyOf(cameras);
-        if (cameras.isEmpty()) {
-            throw new IllegalArgumentException("configuration has no cameras");
-        }
+        // An empty list is valid: a fresh download starts with no camera and the user adds one in
+        // the app (first-run setup). Everything else is still validated strictly.
         if (segmentSeconds < ConfigLoader.MIN_SEGMENT_SECONDS || segmentSeconds > ConfigLoader.MAX_SEGMENT_SECONDS) {
             throw new IllegalArgumentException("recording.segment.seconds out of range: " + segmentSeconds);
         }

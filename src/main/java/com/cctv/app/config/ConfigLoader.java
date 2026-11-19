@@ -25,8 +25,9 @@ import java.util.regex.Pattern;
  * backslash in a path into an escape sequence. Values are taken verbatim and trimmed.
  *
  * <p>Validation is strict: an unusable camera is rejected with the full list of problems instead of
- * silently starting with fewer cameras. Unknown keys are ignored so the file can grow between
- * phases; known keys with bad values are always errors.
+ * silently starting with fewer cameras. A file with no cameras at all is valid — that is the
+ * first-run state, where the user adds cameras in the app. Unknown keys are ignored so the file can
+ * grow between phases; known keys with bad values are always errors.
  */
 public final class ConfigLoader {
 
@@ -73,14 +74,21 @@ public final class ConfigLoader {
         return parse(values, configFile, defaultBaseDir);
     }
 
+    /**
+     * First-run configuration when no {@code cameras.properties} exists yet: an empty camera list
+     * plus the defaults, so the app can start and let the user add a camera in the UI.
+     */
+    public static AppConfig emptyConfig(Path configFile, Path defaultBaseDir) {
+        return new AppConfig(configFile, defaultBaseDir.toAbsolutePath().normalize(), List.of(),
+                DEFAULT_SEGMENT_SECONDS, DEFAULT_RETENTION_DAYS,
+                gbToBytes(DEFAULT_RETENTION_GB), gbToBytes(DEFAULT_MIN_FREE_GB), DEFAULT_AI_RATE_FPS);
+    }
+
     /** Parses already-read key/value pairs; separated from I/O so it is unit-testable. */
     public static AppConfig parse(Map<String, String> values, Path configFile, Path defaultBaseDir) {
         List<String> problems = new ArrayList<>();
 
         List<CameraConfig> cameras = parseCameras(values, problems);
-        if (cameras.isEmpty()) {
-            problems.add("no cameras configured (expected keys like cameras.1.url=rtsp://...)");
-        }
 
         Path base = parseBaseDir(values, configFile, defaultBaseDir, problems);
 

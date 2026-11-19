@@ -85,6 +85,12 @@ public final class CameraForm {
         grid.setVgap(8);
         grid.setPadding(new Insets(14));
         int row = 0;
+        Label help = new Label("Paste your camera's RTSP link (from its phone app, web UI or manual), "
+                + "e.g. rtsp://user:password@192.168.1.50:554/stream1 - put the username and password "
+                + "in their own boxes below.");
+        help.setWrapText(true);
+        help.setStyle("-fx-text-fill:#8a949e; -fx-font-size:11px;");
+        grid.add(help, 0, row++, 2, 1);
         grid.addRow(row++, new Label("Name"), nameField);
         grid.addRow(row++, new Label("Main stream"), urlField);
         grid.addRow(row++, new Label("Substream"), substreamField);
@@ -118,7 +124,7 @@ public final class CameraForm {
 
         populate();
 
-        Scene scene = new Scene(root, 560, 340);
+        Scene scene = new Scene(root, 560, 380);
         stage.setScene(scene);
         scene.setOnKeyPressed(event -> {
             if (event.getCode() == javafx.scene.input.KeyCode.ESCAPE) {

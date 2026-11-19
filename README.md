@@ -2,6 +2,15 @@
 
 Cam Watchman is a Windows desktop CCTV monitoring application built with Java 21 and JavaFX. It provides a four-camera wall, local AI-assisted detection on Camera 1, event recording, zone alerts, counting lines, and clip search.
 
+## Requirements
+
+- **Windows x64.**
+- **FFmpeg** available either on `PATH` or as a static `ffmpeg.exe` in an `ffmpeg\` folder next
+  to `CamWatchman.exe` (or the jar). The wall and the Camera 1 pipeline spawn FFmpeg for RTSP
+  decoding, segment recording and the raw video pipe — it is not linked into the Java process.
+  The packaged app-image bundles Java 21 and the ONNX model; `scripts/package-appimage.ps1` also
+  bundles `tools\ffmpeg\ffmpeg.exe` (or PATH FFmpeg) when one is present.
+
 ## Features
 
 - **Four-camera wall:** RTSP video panels using the bundled JavaCV/FFmpeg decoder. No separate VLC installation is required.
@@ -12,7 +21,31 @@ Cam Watchman is a Windows desktop CCTV monitoring application built with Java 21
 - **Camera management:** add, edit, test, disable, enable, and remove camera configurations. See [Camera management](docs/CAMERA_MANAGEMENT.md).
 - **Clip search:** search recorded clips and labels from the application.
 
-Camera 1 is the full pipeline (display, AI inference, and recording). Cameras 2–4 are display-only in the current build.
+## Connect your camera (first run)
+
+A fresh copy of Cam Watchman has no camera configured. You need your camera's **RTSP link** —
+find it in the camera's phone app, its web interface or its manual. It usually looks like:
+
+```text
+rtsp://[username:password@]<camera-ip>:<port>/<stream-path>
+```
+
+e.g. `rtsp://admin:password@192.168.1.50:554/stream1` or `rtsp://192.168.1.50:8554/live`.
+
+1. Start Cam Watchman. With no camera configured it opens **Cameras** for you (the header
+   **Cameras** button re-opens it at any time).
+2. Click **+ Add camera**.
+3. Give it a name, paste the RTSP link (put any username/password in their own boxes), and
+   optionally tick **record** / **AI** (one full-pipeline camera at a time).
+4. Click **Test connection** to check the link, then **Save** — the wall reloads with your camera.
+
+You can add up to four cameras and **Edit**, **Enable**/**Disable** or **Remove** them later.
+Settings live in `%LOCALAPPDATA%\CamWatchman\` (the app's SQLite database is the source of truth;
+`cameras.properties` is only the first-run seed), so nothing is tied to the source tree.
+
+Each camera can be display-only, or a full pipeline (display + AI + recording) when you tick
+**record** or **AI** on it and give it a main stream. The first enabled full-pipeline camera runs
+the AI/recording pipeline.
 
 ## Developer build
 

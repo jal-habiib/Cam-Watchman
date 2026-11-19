@@ -16,13 +16,10 @@ Write-Host "[installer] staging clean app-image"
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE)" }
 # Ship only a safe example. Real camera credentials are entered by the user in Manage Cameras.
 $example = @'
-# Cam Watchman first-run example. Replace this placeholder using Manage Cameras.
-cameras.1.id=1
-cameras.1.name=Setup required - add your camera
-cameras.1.url=rtsp://127.0.0.1:8554/SETUP_REQUIRED
-cameras.1.substream_url=
-cameras.1.record=false
-cameras.1.ai=false
+# Cam Watchman first run: no camera configured yet.
+# Add your camera in the app:  Cameras (header) -> + Add camera, then paste its RTSP URL.
+# The app opens the camera manager automatically when no camera is set up.
+# RTSP URL format:  rtsp://[username:password@]camera-ip:port/stream-path
 base.data.dir=
 recording.segment.seconds=15
 retention.days=7

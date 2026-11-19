@@ -1,0 +1,10 @@
+# Cam Watchman first run: no camera configured yet.
+# Add your camera in the app:  Cameras (header) -> + Add camera, then paste its RTSP URL.
+# The app opens the camera manager automatically when no camera is set up.
+# RTSP URL format:  rtsp://[username:password@]camera-ip:port/stream-path
+base.data.dir=
+recording.segment.seconds=15
+retention.days=7
+retention.size.gb=40
+retention.min.free.gb=10
+ai.rate.fps=1

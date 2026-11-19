@@ -135,12 +135,20 @@ public final class CamWatchmanApp extends Application {
     public void start(Stage primaryStage) {
         this.stage = primaryStage;
         Path configPath = resolveConfigPath();
-        try {
-            config = ConfigLoader.load(configPath, ConfigLoader.defaultBaseDataDir());
-        } catch (ConfigException e) {
-            log.warn("configuration rejected: {}", e.problems());
-            showConfigError(configPath, e);
-            return;
+        boolean firstRun = !java.nio.file.Files.isRegularFile(configPath);
+        if (firstRun) {
+            // Fresh download: there is no cameras.properties yet. Start with an empty wall and let
+            // the user add their own camera instead of failing on a developer-only test config.
+            config = ConfigLoader.emptyConfig(configPath, ConfigLoader.defaultBaseDataDir());
+            log.info("first run: no configuration at {} - starting in setup mode", configPath);
+        } else {
+            try {
+                config = ConfigLoader.load(configPath, ConfigLoader.defaultBaseDataDir());
+            } catch (ConfigException e) {
+                log.warn("configuration rejected: {}", e.problems());
+                showConfigError(configPath, e);
+                return;
+            }
         }
 
         log.info("configuration loaded from {} ({} cameras, base dir {}, segment {} s)",
@@ -155,7 +163,9 @@ public final class CamWatchmanApp extends Application {
         startStorage();
 
         Scene scene = new Scene(buildWall(), 1100, 700);
-        primaryStage.setTitle("Cam Watchman — " + config.cameras().size() + " cameras");
+        primaryStage.setTitle(activeCameras.isEmpty()
+                ? "Cam Watchman — add your camera"
+                : "Cam Watchman — " + activeCameras.size() + " cameras");
         primaryStage.setScene(scene);
         primaryStage.setOnCloseRequest(e -> {
             if (System.getProperty("cctv.soak") != null) {
@@ -177,6 +187,14 @@ public final class CamWatchmanApp extends Application {
         }
         if (detectionOverlay != null) {
             detectionOverlay.start();
+        }
+        if (activeCameras.isEmpty()) {
+            // Setup mode: no camera yet. Open the manager so the user sees "+ Add camera" and the
+            // RTSP URL field straight away.
+            after(2, () -> {
+                openCameraManager();
+                log.info("setup: opened the camera manager to add the first camera");
+            });
         }
 
         scene.setOnKeyPressed(event -> {

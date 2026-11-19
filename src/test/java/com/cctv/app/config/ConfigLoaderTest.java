@@ -121,10 +121,23 @@ class ConfigLoaderTest {
     }
 
     @Test
-    void rejectsEmptyFileAndOutOfRangeValues() {
-        ConfigException empty = assertThrows(ConfigException.class, () -> parse("# nothing here\n"));
-        assertTrue(empty.problems().stream().anyMatch(p -> p.contains("no cameras configured")));
+    void emptyFileMeansFirstRun() throws IOException {
+        AppConfig cfg = parse("# nothing here\n");
+        assertTrue(cfg.cameras().isEmpty(), "a file with no cameras is the first-run state");
+        assertEquals(ConfigLoader.DEFAULT_SEGMENT_SECONDS, cfg.segmentSeconds());
+    }
 
+    @Test
+    void emptyConfigBuildsDefaults() {
+        AppConfig cfg = ConfigLoader.emptyConfig(tmp.resolve("cameras.properties"), tmp);
+        assertTrue(cfg.cameras().isEmpty());
+        assertTrue(cfg.baseDataDir().isAbsolute());
+        assertEquals(ConfigLoader.DEFAULT_SEGMENT_SECONDS, cfg.segmentSeconds());
+        assertEquals(ConfigLoader.DEFAULT_RETENTION_DAYS, cfg.retentionDays());
+    }
+
+    @Test
+    void rejectsOutOfRangeValues() {
         String text = VALID + """
                 recording.segment.seconds=90
                 ai.rate.fps=0
