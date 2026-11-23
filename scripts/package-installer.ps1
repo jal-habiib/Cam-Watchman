@@ -1,6 +1,6 @@
 #requires -Version 5.1
 [CmdletBinding()]
-param([string]$Version = "0.1.0")
+param([string]$Version = "0.2.0")
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $appImage = Join-Path $root "dist\CamWatchman"

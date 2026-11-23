@@ -2,7 +2,7 @@
 #define AppPublisher "Cam Watchman"
 #define AppExeName "CamWatchman.exe"
 #ifndef AppVersion
-  #define AppVersion "0.1.0"
+  #define AppVersion "0.2.0"
 #endif
 #ifndef StageDir
   #define StageDir "..\dist\installer-stage\CamWatchman"

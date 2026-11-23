@@ -2,6 +2,13 @@
 
 Cam Watchman is a Windows desktop CCTV monitoring application built with Java 21 and JavaFX. It provides a four-camera wall, independent per-camera AI-assisted detection and MKV recording, zone alerts, counting lines, and clip search.
 
+## Current build: v0.2.0 Windows early access
+
+The current source is version `0.2.0-SNAPSHOT` and the Windows packages are built from the four-camera implementation. The latest validation run passed **142 Maven tests (0 failures, 0 errors, 0 skipped)**. The portable ZIP passed the archive audit (388 files, no user data or credential hits) and an isolated install/uninstall smoke test that confirmed user data survives uninstall. The Inno Setup installer compiled successfully; its installed runtime has not yet been re-tested in isolation for v0.2.0.
+
+This build remains **internal testing only**. Physical CCTV compatibility, clean-PC acceptance, AI accuracy and third-party licensing are not complete. The installer is unsigned and the local Inno Setup compiler reports non-commercial-use-only terms. See [v0.2.0 release notes](RELEASE_NOTES-v0.2.0.md) and [internal testing guide](INTERNAL_TESTING_GUIDE-v0.2.0.md).
+
+
 ## Requirements
 
 - **Windows x64.**

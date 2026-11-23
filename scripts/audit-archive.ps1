@@ -10,7 +10,7 @@
     any violation.
 
 .EXAMPLE
-    pwsh scripts/audit-archive.ps1 -Archive dist\CamWatchman-0.1.0-win64.zip
+    pwsh scripts/audit-archive.ps1 -Archive dist\CamWatchman-0.2.0-win64.zip
 #>
 [CmdletBinding()]
 param(
@@ -60,8 +60,10 @@ try {
     foreach ($file in $textFiles) {
         $content = Get-Content -Path $file.FullName -Raw -ErrorAction SilentlyContinue
         if ($null -eq $content) { continue }
-        # Placeholder credentials (USER:PASS, user:pass, <user>, ***) are documentation, not secrets.
-        $content = $content -replace '(?i)(user|<user>|\*\*\*):(pass|<pass>|password|\*\*\*)', ''
+        # Remove explicit documentation placeholders only; actual RTSP credentials remain detectable.
+        $content = $content -replace '(?i)rtsp://\[(?:username|user):(?:password|pass)@\]', ''
+        $content = $content -replace '(?i)rtsp://<(?:username|user)>:<(?:password|pass)>@', ''
+        $content = $content -replace '(?i)(?:username|user):(?:password|pass)', ''
         if ($content -match 'rtsp://[^/\s"''@]+:[^/\s"''@]+@' -or
             $content -match '(?i)(password|passwd|pwd|token|secret)\s*[:=]\s*["'']?[^\s"''#]{6,}') {
             $secretHits += $file.FullName.Substring($temp.Length).TrimStart('\')
