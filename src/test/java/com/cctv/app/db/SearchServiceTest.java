@@ -79,29 +79,29 @@ class SearchServiceTest {
     @Test
     void findsEveryClipWithTheObject() throws Exception {
         var result = SearchService.search(db, SearchService.Query.of("car", 0, Long.MAX_VALUE / 4));
-        assertEquals(2, result.hits().size(), "rows 3 (missing file) and 4 (no clip_labels) excluded");
+        assertEquals(1, result.hits().size(), "non-kept clip c.mkv and missing gone.mkv are excluded");
         assertEquals(1, result.skippedMissingFiles(), "only gone.mkv is missing");
         assertTrue(result.hits().stream().allMatch(hit -> hit.objects().contains("car")));
-        assertEquals("a.mkv", result.hits().get(1).file().getFileName().toString(), "newest first");
+        assertEquals("a.mkv", result.hits().get(0).file().getFileName().toString(), "newest first");
     }
 
     @Test
     void filtersByDateRange() throws Exception {
-        var result = SearchService.search(db, SearchService.Query.of("", 3_500_000, 4_500_000));
+        var result = SearchService.search(db, SearchService.Query.of("", 1_500_000, 2_500_000));
         assertEquals(1, result.hits().size());
-        assertEquals(4, result.hits().get(0).recordingId());
+        assertEquals(2, result.hits().get(0).recordingId());
     }
 
     @Test
-    void blankObjectListsAllReadyClips() throws Exception {
+    void blankObjectListsAllKeptClips() throws Exception {
         var result = SearchService.search(db, SearchService.Query.of("  ", 0, Long.MAX_VALUE / 4));
-        assertEquals(3, result.hits().size(), "one missing-file row skipped");
+        assertEquals(2, result.hits().size(), "non-kept and missing-file rows are excluded");
     }
 
     @Test
     void objectMatchIsCaseInsensitiveAndPartial() throws Exception {
         var result = SearchService.search(db, SearchService.Query.of("CAr", 0, Long.MAX_VALUE / 4));
-        assertEquals(2, result.hits().size());
+        assertEquals(1, result.hits().size(), "only kept clips are searchable");
     }
 
     @Test
@@ -113,7 +113,7 @@ class SearchServiceTest {
     @Test
     void labelsAreAggregatedPerClass() throws Exception {
         var result = SearchService.search(db, SearchService.Query.of("car", 0, Long.MAX_VALUE / 4));
-        var label = result.hits().get(1).labels().get(0);
+        var label = result.hits().get(0).labels().get(0);
         assertEquals("car", label.objectClass());
         assertEquals(5, label.count());
         assertEquals(0.91, label.maxConfidence(), 1e-9);

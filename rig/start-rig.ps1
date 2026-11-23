@@ -1,7 +1,7 @@
 # Phase 0e test rig - MediaMTX + looped FFmpeg publishers.
 #
-#   cam1_main           1280x720 @25  H.264, packet copy from the source clip (no re-encode)
-#   cam1_sub..cam4_sub   640x360 @10  H.264, scaled + re-encoded (the display-only streams)
+#   cam1_main..cam4_main 1280x720 @25 H.264, independent recording/AI inputs
+#   cam1_sub..cam4_sub   640x360 @10 H.264, scaled display streams
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File rig\start-rig.ps1
 # Stop:   powershell -ExecutionPolicy Bypass -File rig\stop-rig.ps1
@@ -97,9 +97,11 @@ function Start-Publisher([string]$Name, [string]$Clip, [string[]]$Extra) {
     Write-Host ("[rig] {0,-9} pid={1}" -f $Name, $p.Id)
 }
 
-# Camera 1 main stream: compressed packet copy, no decode and no re-encode.
-Start-Publisher 'cam1_main' $clips.cam1 @('-c', 'copy')
-# Display-only substreams: scaled down, low frame rate - exactly what VLCJ will play.
+# Camera main streams: one independent full-resolution input per camera.
+foreach ($c in 1..4) {
+    Start-Publisher "cam${c}_main" $clips["cam$c"] @('-c', 'copy')
+}
+# Display substreams: scaled down, low frame rate for the camera wall.
 foreach ($c in 1..4) {
     Start-Publisher "cam${c}_sub" $clips["cam$c"] @(
         '-vf', 'scale=640:360', '-r', '10', '-c:v', 'libx264',
@@ -110,7 +112,7 @@ $state | ConvertTo-Json -Depth 4 | Set-Content -Path $pidFile -Encoding utf8
 Write-Host "[rig] pids -> $pidFile"
 
 # --- wait until every path is publishing -------------------------------------------------
-$names = @('cam1_main') + (1..4 | ForEach-Object { "cam${_}_sub" })
+$names = (1..4 | ForEach-Object { "cam${_}_main" }) + (1..4 | ForEach-Object { "cam${_}_sub" })
 $deadline = (Get-Date).AddSeconds(25)
 $ready = @()
 do {

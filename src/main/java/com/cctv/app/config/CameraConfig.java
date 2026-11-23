@@ -6,9 +6,9 @@ import java.util.Objects;
 /**
  * One camera as configured by {@code cameras.properties} (plan 1b).
  *
- * <p>Camera 1 (or any camera with {@code ai} or {@code record} enabled) must have a main-stream
- * {@link #mainUrl()}. Display-only cameras need only a {@link #substreamUrl()}. One connection
- * per stream profile is the caller's responsibility: this record only describes the profiles.
+ * <p>Any camera with {@code ai} or {@code record} enabled must have a main-stream
+ * {@link #mainUrl()}. Display-only cameras need only a {@link #substreamUrl()}. Each camera
+ * runtime owns its connections; this record only describes the stream profiles.
  *
  * @param id           stable numeric id, unique across the file and used in paths/DB
  * @param name         short human name shown on the wall

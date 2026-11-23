@@ -58,7 +58,7 @@ try {
     & jpackage --type app-image --name CamWatchman --dest $DistDir --input $stageInput `
         --main-jar $jarName --main-class com.cctv.app.Main `
         --app-version $Version --vendor "Cam Watchman" `
-        --description "4-camera CCTV wall (Camera 1 full pipeline)" `
+        --description "4-camera CCTV wall with independent recording and AI" `
         --java-options "-Xms128m" --java-options "-Xmx1200m" `
         --java-options "-Dfile.encoding=UTF-8"
     if ($LASTEXITCODE -ne 0) { throw "jpackage failed" }
@@ -68,19 +68,31 @@ try {
     Copy-Item "models\yolo11n.onnx" (Join-Path $app "models") -Force
     Copy-Item "cameras.properties.example" $app -Force
 
-    # Optional: bundle a static ffmpeg.exe so the image runs without a machine-wide install.
-    $ffmpegSource = Join-Path $root "tools\ffmpeg\ffmpeg.exe"
-    if (-not (Test-Path $ffmpegSource)) {
+    # FFmpeg is a required application dependency, not an optional machine-wide prerequisite.
+    # Prefer an explicitly supplied binary, then the repository's tools folder, then PATH.
+    $ffmpegSource = $env:CAMWATCHMAN_FFMPEG
+    if ([string]::IsNullOrWhiteSpace($ffmpegSource)) {
+        $candidate = Join-Path $root "tools\ffmpeg\ffmpeg.exe"
+        if (Test-Path $candidate) { $ffmpegSource = $candidate }
+    }
+    if ([string]::IsNullOrWhiteSpace($ffmpegSource)) {
         $onPath = Get-Command ffmpeg -ErrorAction SilentlyContinue
         if ($onPath) { $ffmpegSource = $onPath.Source }
     }
-    if (Test-Path $ffmpegSource) {
-        New-Item -ItemType Directory -Force (Join-Path $app "ffmpeg") | Out-Null
-        Copy-Item $ffmpegSource (Join-Path $app "ffmpeg\ffmpeg.exe") -Force
-        Write-Host "[package] bundled ffmpeg from $ffmpegSource"
-    } else {
-        Write-Host "[package] WARNING: no ffmpeg found; put a static tools\ffmpeg\ffmpeg.exe here to bundle it"
+    if ([string]::IsNullOrWhiteSpace($ffmpegSource) -or -not (Test-Path $ffmpegSource -PathType Leaf)) {
+        throw "FFmpeg is required for camera streaming. Set CAMWATCHMAN_FFMPEG to a redistributable ffmpeg.exe or place it at tools\ffmpeg\ffmpeg.exe. Refusing to build an incomplete customer app."
     }
+    $ffmpegSource = (Resolve-Path $ffmpegSource).Path
+    $ffmpegDir = Split-Path $ffmpegSource -Parent
+    $bundleDir = Join-Path $app "ffmpeg"
+    New-Item -ItemType Directory -Force $bundleDir | Out-Null
+    Copy-Item $ffmpegSource (Join-Path $bundleDir "ffmpeg.exe") -Force
+    # Shared Windows FFmpeg builds need their adjacent runtime DLLs. Static builds simply have none.
+    Get-ChildItem $ffmpegDir -Filter "*.dll" -File -ErrorAction SilentlyContinue |
+        Copy-Item -Destination $bundleDir -Force
+    $bundledFfmpeg = Join-Path $bundleDir "ffmpeg.exe"
+    if (-not (Test-Path $bundledFfmpeg -PathType Leaf)) { throw "FFmpeg bundle is incomplete: ffmpeg.exe missing" }
+    Write-Host "[package] required FFmpeg bundled from $ffmpegSource"
 
     # Smoke runs inside the app-image write cameras.properties and tmp\ data next to the launcher.
     # A distributable image must never contain those, so scrub user artifacts after every build.

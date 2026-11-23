@@ -30,8 +30,8 @@ import org.slf4j.LoggerFactory;
  * only the newest completed image is copied into JavaFX on the application thread.
  * RTSP is forced over TCP and retries use bounded backoff.
  *
- * <p>This deliberately spawns the external {@code ffmpeg} executable (exactly as the Camera 1
- * pipeline does in {@code com.cctv.engine.FfmpegCamera1Process}) instead of JavaCV's
+ * <p>This deliberately spawns the external {@code ffmpeg} executable (as the per-camera
+ * capture/record pipeline does in {@code com.cctv.engine.FfmpegCamera1Process}) instead of JavaCV's
  * {@code FFmpegFrameGrabber}: the bundled JavaCV FFmpeg build cannot open MediaMTX's RTSP relays
  * ({@code avformat_open_input() error -875574520}, then hangs), while the external ffmpeg binary
  * (see {@link com.cctv.app.util.FfmpegBinary}) opens the same streams immediately.

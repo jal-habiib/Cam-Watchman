@@ -18,6 +18,6 @@ $paths |
         @{n='tracks';e={($_.tracks -join ',')}} |
     Format-Table -AutoSize | Out-String | Write-Host
 
-$names = @('cam1_main') + (1..4 | ForEach-Object { "cam${_}_sub" })
+$names = (1..4 | ForEach-Object { "cam${_}_main" }) + (1..4 | ForEach-Object { "cam${_}_sub" })
 $missing = $names | Where-Object { $_ -notin $paths.name }
-if ($missing) { Write-Host "[rig] MISSING: $($missing -join ', ')" } else { Write-Host '[rig] all 5 expected paths present.' }
+if ($missing) { Write-Host "[rig] MISSING: $($missing -join ', ')" } else { Write-Host '[rig] all 8 expected paths present.' }

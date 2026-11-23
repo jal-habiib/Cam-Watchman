@@ -63,7 +63,39 @@ class ConfigLoaderTest {
         assertEquals(tmp.resolve("default-data"), cfg.baseDataDir());
         assertEquals(tmp.resolve("default-data").resolve("recordings"), cfg.recordingsDir());
         assertEquals(tmp.resolve("default-data").resolve("cam-watchman.db"), cfg.databaseFile());
-        assertSame(cfg.cameras().get(0), cfg.fullPipelineCamera());
+        assertSame(cfg.cameras().get(0), cfg.firstMainStreamCamera());
+    }
+
+    @Test
+    void acceptsFourIndependentAiAndRecordingCameras() throws IOException {
+        StringBuilder text = new StringBuilder();
+        for (int camera = 1; camera <= 4; camera++) {
+            text.append("cameras.").append(camera).append(".id=").append(camera).append('\n')
+                    .append("cameras.").append(camera).append(".name=Camera ").append(camera).append('\n')
+                    .append("cameras.").append(camera).append(".url=rtsp://192.0.2.").append(camera).append(":554/main\n")
+                    .append("cameras.").append(camera).append(".substream_url=rtsp://192.0.2.").append(camera).append(":554/sub\n")
+                    .append("cameras.").append(camera).append(".record=true\n")
+                    .append("cameras.").append(camera).append(".ai=true\n");
+        }
+
+        AppConfig cfg = parse(text.toString());
+
+        assertEquals(4, cfg.cameras().size());
+        assertTrue(cfg.cameras().stream().allMatch(CameraConfig::hasMain));
+        assertTrue(cfg.cameras().stream().allMatch(CameraConfig::record));
+        assertTrue(cfg.cameras().stream().allMatch(CameraConfig::ai));
+        assertSame(cfg.cameras().get(0), cfg.firstMainStreamCamera());
+    }
+
+    @Test
+    void rigTemplateEnablesAiAndRecordingOnAllFourCameras() throws IOException {
+        AppConfig cfg = parse(RigConfigTemplate.propertiesText());
+
+        assertEquals(4, cfg.cameras().size());
+        assertTrue(cfg.cameras().stream().allMatch(CameraConfig::hasMain));
+        assertTrue(cfg.cameras().stream().allMatch(CameraConfig::hasSubstream));
+        assertTrue(cfg.cameras().stream().allMatch(CameraConfig::record));
+        assertTrue(cfg.cameras().stream().allMatch(CameraConfig::ai));
     }
 
     @Test

@@ -26,7 +26,11 @@ if ([string]::IsNullOrWhiteSpace($FfmpegPath) -or !(Test-Path $FfmpegPath) -or !
     throw 'FFmpeg or the moving crosswalk sample is missing. Supply -FfmpegPath if FFmpeg is not on PATH.'
 }
 
-$names = @('cam1_main','cam1_sub','cam2_sub','cam3_sub','cam4_sub')
+$names = @()
+foreach ($camera in 1..4) {
+    $names += "cam${camera}_main"
+    $names += "cam${camera}_sub"
+}
 foreach ($name in $names) {
     $id = [int]$state.publishers.$name
     $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$id"
@@ -51,10 +55,9 @@ function Start-RigPublisher([string]$name, [bool]$main) {
     Write-Output "$name -> PID $($p.Id)"
 }
 
-Start-RigPublisher 'cam1_main' $true
-Start-RigPublisher 'cam1_sub' $false
-Start-RigPublisher 'cam2_sub' $false
-Start-RigPublisher 'cam3_sub' $false
-Start-RigPublisher 'cam4_sub' $false
+foreach ($camera in 1..4) {
+    Start-RigPublisher "cam${camera}_main" $true
+    Start-RigPublisher "cam${camera}_sub" $false
+}
 $state | ConvertTo-Json -Depth 4 | Set-Content -Path $pidFile -Encoding utf8
-Write-Output 'Moving crosswalk footage is now publishing to all four camera panels (Camera 1 main and substreams; Cameras 2-4 substreams).'
+Write-Output 'Moving crosswalk footage is now publishing to all four cameras (four main AI/recording streams and four display substreams).'

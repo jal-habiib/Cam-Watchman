@@ -17,7 +17,7 @@ import java.util.List;
  * @param retentionDays         delete kept clips older than this
  * @param retentionMaxBytes     total recordings cap in bytes
  * @param minFreeBytes          free-space guard: stop keeping new clips below this
- * @param aiRateFps             inferences per second on Camera 1 (plan default 1)
+ * @param aiRateFps             maximum inference cadence per enabled AI camera (default 1 FPS)
  */
 public record AppConfig(Path configFile,
                         Path baseDataDir,
@@ -69,11 +69,17 @@ public record AppConfig(Path configFile,
         return baseDataDir.resolve("logs");
     }
 
-    /** The camera with the full pipeline (the plan assumes exactly one; the first one wins). */
-    public CameraConfig fullPipelineCamera() {
+    /** First configured camera with an AI or recording main-stream pipeline. */
+    public CameraConfig firstMainStreamCamera() {
         return cameras.stream()
                 .filter(CameraConfig::needsMainStream)
                 .findFirst()
                 .orElseThrow(() -> new IllegalStateException("no camera has AI or recording enabled"));
+    }
+
+    /** @deprecated use {@link #firstMainStreamCamera()}; multiple cameras may run full pipelines. */
+    @Deprecated(forRemoval = false)
+    public CameraConfig fullPipelineCamera() {
+        return firstMainStreamCamera();
     }
 }

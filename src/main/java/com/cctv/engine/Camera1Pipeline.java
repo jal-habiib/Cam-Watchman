@@ -13,8 +13,8 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * Owns the Camera 1 capture-to-AI path. One FFmpeg grabber feeds a latest-frame handoff;
- * the CPU YOLO worker samples that handoff at the configured inference rate.
+ * Owns one camera's capture-to-AI path. One FFmpeg grabber feeds a latest-frame handoff;
+ * that camera's CPU YOLO worker samples it at the configured inference rate.
  *
  * <p>Construct this away from the JavaFX thread because ONNX model loading is synchronous.
  * The application owns the returned pipeline and must close it during shutdown.

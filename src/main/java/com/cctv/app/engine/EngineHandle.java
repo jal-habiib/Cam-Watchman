@@ -9,17 +9,17 @@ import java.nio.file.Path;
 import java.util.Optional;
 
 /**
- * App-side handle for the Camera 1 engine pipeline.
+ * App-side handle for one camera's engine pipeline.
  *
  * <p>Two engine shapes exist and only one may ever open the main stream:
  * <ul>
- *   <li>{@link FfmpegCamera1Pipeline} — one FFmpeg process that packet-copies MKV segments and decodes
- *       frames for AI. Used when the camera records, because recording is part of that process.</li>
- *   <li>{@link Camera1Pipeline} — JavaCV capture for display + AI without recording.</li>
+ *   <li>{@link FfmpegCamera1Pipeline} — one FFmpeg process that packet-copies MKV segments and
+ *       supplies display frames; its AI worker is optional for record-only cameras.</li>
+ *   <li>{@link Camera1Pipeline} — JavaCV capture for display + AI when recording is disabled.</li>
  * </ul>
  *
  * <p>The handle keeps the rest of the app (display tap, status badges, shutdown) independent of which
- * shape is active. Creation is synchronous and loads the ONNX model, so call it off the JavaFX thread.
+ * shape is active. Creation is synchronous and may load the ONNX model when AI is enabled, so call it off the JavaFX thread.
  */
 public final class EngineHandle implements AutoCloseable {
 
@@ -37,8 +37,8 @@ public final class EngineHandle implements AutoCloseable {
     }
 
     /**
-     * Creates the pipeline the camera configuration asks for. A camera that records uses the
-     * packet-copy process; one that only analyses uses the JavaCV capture.
+     * Creates the pipeline the camera configuration asks for. Recording and AI flags are independent;
+     * a record-only camera does not load or run an ONNX model.
      */
     public static EngineHandle create(long cameraId, java.net.URI mainUrl, Path modelPath,
                                       Path recordingsDir, int segmentSeconds, boolean record,
@@ -69,13 +69,27 @@ public final class EngineHandle implements AutoCloseable {
                                       com.cctv.contract.LineSource lines,
                                       com.cctv.contract.ZoneSource zones)
             throws IOException, ai.onnxruntime.OrtException {
+        return create(cameraId, mainUrl, modelPath, recordingsDir, segmentSeconds, record, true,
+                bus, aiRateFps, lines, zones);
+    }
+
+    /** Creates a per-camera runtime with independent recording and AI enablement. */
+    public static EngineHandle create(long cameraId, java.net.URI mainUrl, Path modelPath,
+                                      Path recordingsDir, int segmentSeconds, boolean record,
+                                      boolean ai, EventBus bus, double aiRateFps,
+                                      com.cctv.contract.LineSource lines,
+                                      com.cctv.contract.ZoneSource zones)
+            throws IOException, ai.onnxruntime.OrtException {
         com.cctv.contract.LineSource source = lines == null
                 ? camera -> java.util.List.of() : lines;
         com.cctv.contract.ZoneSource zoneSource = zones == null
                 ? camera -> java.util.List.of() : zones;
+        if (!record && !ai) {
+            throw new IllegalArgumentException("a camera without recording or AI does not need an engine runtime");
+        }
         if (record) {
             FfmpegCamera1Pipeline pipeline = FfmpegCamera1Pipeline.create(cameraId, mainUrl, modelPath,
-                    recordingsDir, segmentSeconds, bus, aiRateFps, source, zoneSource);
+                    recordingsDir, segmentSeconds, bus, aiRateFps, source, zoneSource, ai);
             return new EngineHandle(null, pipeline);
         }
         return new EngineHandle(Camera1Pipeline.create(cameraId, mainUrl, modelPath, bus,

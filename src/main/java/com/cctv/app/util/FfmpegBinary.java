@@ -2,6 +2,7 @@ package com.cctv.app.util;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Locale;
 
 /**
  * Resolves the external {@code ffmpeg} executable used for RTSP decoding and recording.
@@ -17,12 +18,18 @@ public final class FfmpegBinary {
     private FfmpegBinary() {
     }
 
-    /** Absolute path to a bundled ffmpeg when present, otherwise the plain command name. */
+    /** Absolute path to a bundled ffmpeg when present, otherwise the command available on PATH. */
     public static String resolve() {
         String explicit = System.getProperty("cctv.ffmpeg");
         if (explicit != null && !explicit.isBlank()) {
-            return explicit;
+            Path configured = Path.of(explicit).toAbsolutePath().normalize();
+            if (!Files.isRegularFile(configured)) {
+                throw new IllegalStateException("Configured FFmpeg executable does not exist: " + configured);
+            }
+            return configured.toString();
         }
+        String executable = System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("win")
+                ? "ffmpeg.exe" : "ffmpeg";
         try {
             Path code = Path.of(FfmpegBinary.class.getProtectionDomain().getCodeSource()
                     .getLocation().toURI());
@@ -31,11 +38,11 @@ public final class FfmpegBinary {
                 if (base == null) {
                     continue;
                 }
-                Path bundled = base.resolve("ffmpeg").resolve("ffmpeg.exe");
+                Path bundled = base.resolve("ffmpeg").resolve(executable);
                 if (Files.isRegularFile(bundled)) {
                     return bundled.toString();
                 }
-                bundled = base.resolve("ffmpeg.exe");
+                bundled = base.resolve(executable);
                 if (Files.isRegularFile(bundled)) {
                     return bundled.toString();
                 }
@@ -43,6 +50,6 @@ public final class FfmpegBinary {
         } catch (Exception ignored) {
             // fall through to PATH
         }
-        return "ffmpeg";
+        return executable;
     }
 }

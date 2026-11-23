@@ -52,8 +52,10 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import javafx.animation.PauseTransition;
 import javafx.application.Application;
@@ -79,11 +81,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Application shell (plan 1b/1c): loads and validates {@code cameras.properties}, shows the 2x2
- * wall with a per-camera name and stream badge, and keeps a footer with the resolved paths.
- *
- * <p>Video surfaces are not attached yet — that is Phase 1a/6a. The shell's job today is to prove
- * configuration, path resolution and the badge wiring so the engine can plug in later.
+ * JavaFX desktop application shell. Loads the local camera configuration, builds the four-camera
+ * wall, and coordinates per-camera capture/AI/recording runtimes, event overlays, alerts, search,
+ * counting, camera management and local storage. Runtime startup and teardown stay off the FX thread
+ * wherever they can block; camera events are routed by camera id.
  */
 public final class CamWatchmanApp extends Application {
 
@@ -113,16 +114,18 @@ public final class CamWatchmanApp extends Application {
     private CountsView countsView;
     private LineEditor lineEditor;
     private StackPane wallStack;
-    private volatile EngineHandle pipeline;
+    private final Map<Long, EngineHandle> pipelines = new ConcurrentHashMap<>();
     private final Map<Long, java.util.Set<java.nio.file.Path>> openSegments = new java.util.concurrent.ConcurrentHashMap<>();
     private final Map<Long, Long> segmentStartUtc = new java.util.concurrent.ConcurrentHashMap<>();
-    private volatile long engineCameraId = -1;
+    private final Map<Long, EngineVideoView> engineViews = new ConcurrentHashMap<>();
+    private final Map<Long, DetectionOverlay> detectionOverlays = new ConcurrentHashMap<>();
+    private final AtomicLong engineGeneration = new AtomicLong();
+    private final AtomicBoolean storageRefreshPending = new AtomicBoolean();
+    private final Object runtimeLock = new Object();
     private com.cctv.app.label.ClipLabeler clipLabeler;
     private com.cctv.app.alert.ZoneConfirmer zoneConfirmer;
     private EventBus.Subscription trackingSubscription;
     private ExecutorService engineStart;
-    private EngineVideoView engineView;
-    private DetectionOverlay detectionOverlay;
     private Label detectionLabel;
     private final Map<String, Detection> lastDetectionByClass = new ConcurrentHashMap<>();
     private final AtomicLong detectionsSeen = new AtomicLong();
@@ -130,6 +133,9 @@ public final class CamWatchmanApp extends Application {
     private CameraStore cameraStore;
     private CameraManagerView cameraManager;
     private volatile List<CameraConfig> activeCameras;
+
+    private record StorageSnapshot(long usedBytes, long freeBytes, boolean recordingAllowed,
+                                   long droppedCommands, int queuedCommands, boolean databaseFailed) { }
 
     @Override
     public void start(Stage primaryStage) {
@@ -178,16 +184,12 @@ public final class CamWatchmanApp extends Application {
         });
         primaryStage.show();
 
-        // Display-only FFmpeg decoders start after the wall is visible.
+        // Start all live views after the wall is visible.
         for (FfmpegDisplayView video : videoViews) {
             video.start();
         }
-        if (engineView != null) {
-            engineView.start();
-        }
-        if (detectionOverlay != null) {
-            detectionOverlay.start();
-        }
+        engineViews.values().forEach(EngineVideoView::start);
+        detectionOverlays.values().forEach(DetectionOverlay::start);
         if (activeCameras.isEmpty()) {
             // Setup mode: no camera yet. Open the manager so the user sees "+ Add camera" and the
             // RTSP URL field straight away.
@@ -213,7 +215,7 @@ public final class CamWatchmanApp extends Application {
             } else if (event.getCode() == javafx.scene.input.KeyCode.F && event.isControlDown()) {
                 showSearch(null);
             } else if (event.getCode() == javafx.scene.input.KeyCode.ESCAPE && searchView != null
-                    && root != null && root.getCenter() == searchView) {
+                    && wallStack != null && wallStack.getChildren().contains(searchView)) {
                 showWall();
             } else if (event.getCode() == javafx.scene.input.KeyCode.ESCAPE && focusedIndex >= 0) {
                 toggleFocus(focusedIndex);
@@ -343,7 +345,7 @@ public final class CamWatchmanApp extends Application {
             });
         }
 
-        // Engine (Phase 1a) publishes StreamStatusEvent; the badge contract v0.2 is wired here.
+        // Each camera runtime publishes StreamStatusEvent; the wall badge is updated by camera id.
         bus.subscribe(StreamStatusEvent.class, state -> {
             log.info("stream state: camera {} {} ({})", state.cameraId(), state.state(), state.detail());
             lastStatusByCamera.put(state.cameraId(), state.state()
@@ -362,8 +364,9 @@ public final class CamWatchmanApp extends Application {
             detectionsSeen.incrementAndGet();
             lastDetectionByClass.put(detection.objectClass(), detection);
             Platform.runLater(() -> {
-                if (detectionOverlay != null) {
-                    detectionOverlay.accept(detection);
+                DetectionOverlay overlay = detectionOverlays.get(detection.cameraId());
+                if (overlay != null) {
+                    overlay.accept(detection);
                 }
                 refreshDetectionHint();
             });
@@ -371,8 +374,9 @@ public final class CamWatchmanApp extends Application {
         // Engine tracking (plan 7a): one snapshot per inference frame; id labels on the overlay.
         trackingSubscription = bus.subscribe(com.cctv.engine.TrackingUpdate.class, update -> {
             Platform.runLater(() -> {
-                if (detectionOverlay != null) {
-                    detectionOverlay.acceptTracking(update);
+                DetectionOverlay overlay = detectionOverlays.get(update.cameraId());
+                if (overlay != null) {
+                    overlay.acceptTracking(update);
                 }
             });
         });
@@ -402,14 +406,14 @@ public final class CamWatchmanApp extends Application {
     private HBox header() {
         Label title = new Label("CAM WATCHMAN");
         title.setStyle("-fx-text-fill:#f2f2f2; -fx-font-size:16px; -fx-font-weight:bold; -fx-letter-spacing:2px;");
-        Label subtitle = new Label("4-camera wall · camera 1 full pipeline");
+        Label subtitle = new Label("4-camera wall · independent AI + recording per camera");
         subtitle.setStyle("-fx-text-fill:#7a7a7a; -fx-font-size:11px;");
         VBox titles = new VBox(1, title, subtitle);
 
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
-        Label phase = new Label("Phase 1 · configuration loaded");
+        Label phase = new Label("Local monitoring · AI + recording");
         phase.setStyle("-fx-text-fill:#8a8a8a; -fx-font-size:11px;");
 
         Button search = new Button("Search clips");
@@ -475,6 +479,8 @@ public final class CamWatchmanApp extends Application {
         }
         cameraManager.refresh();
         cameraManager.show();
+        cameraManager.toFront();
+        cameraManager.requestFocus();
     }
 
     /**
@@ -486,41 +492,35 @@ public final class CamWatchmanApp extends Application {
         if (wallStack == null) {
             return;
         }
-        EngineHandle previous = pipeline;
-        pipeline = null;
+        synchronized (runtimeLock) {
+            engineGeneration.incrementAndGet();
+            pipelines.values().forEach(EngineHandle::close);
+            pipelines.clear();
+        }
+        if (engineStart != null) {
+            engineStart.shutdownNow();
+            engineStart = null;
+        }
         for (FfmpegDisplayView video : videoViews) {
             video.close();
         }
         videoViews.clear();
         videoByCamera.clear();
-        if (engineView != null) {
-            engineView.close();
-            engineView = null;
-        }
-        if (detectionOverlay != null) {
-            detectionOverlay.close();
-            detectionOverlay = null;
-        }
+        engineViews.values().forEach(EngineVideoView::close);
+        engineViews.clear();
+        detectionOverlays.values().forEach(DetectionOverlay::close);
+        detectionOverlays.clear();
         cells.clear();
         cellOrder.clear();
         focusedIndex = -1;
-        engineCameraId = -1;
         lastStatusByCamera.clear();
-        if (previous != null) {
-            // Close synchronously: the new wall must not open a second connection to Camera 1.
-            previous.close();
-        }
         refreshActiveCameras();
         wallStack.getChildren().set(0, wall());
         for (FfmpegDisplayView video : videoViews) {
             video.start();
         }
-        if (engineView != null) {
-            engineView.start();
-        }
-        if (detectionOverlay != null) {
-            detectionOverlay.start();
-        }
+        engineViews.values().forEach(EngineVideoView::start);
+        detectionOverlays.values().forEach(DetectionOverlay::start);
         startEngine();
         refreshOverlays();
         publishInitialStates();
@@ -554,15 +554,20 @@ public final class CamWatchmanApp extends Application {
                 cell.setVideo(video);
                 videoViews.add(video);
                 videoByCamera.put(camera.id(), video);
-            } else if (camera.hasMain() && (camera.ai() || camera.record())) {
-                // Phase 6c: Camera 1 video comes from the engine display tap, plus a detection overlay.
-                EngineVideoView video = new EngineVideoView(() -> pipeline == null ? java.util.Optional.<com.cctv.contract.Frame>empty() : pipeline.latestFrame());
-                engineView = video;
-                detectionOverlay = new DetectionOverlay();
-                detectionOverlay.setManaged(false);
-                detectionOverlay.widthProperty().bind(video.widthProperty());
-                detectionOverlay.heightProperty().bind(video.heightProperty());
-                StackPane layer = new StackPane(video, detectionOverlay);
+            } else if (camera.hasMain() && camera.needsMainStream()) {
+                long cameraId = camera.id();
+                EngineVideoView video = new EngineVideoView(() -> {
+                    EngineHandle handle = pipelines.get(cameraId);
+                    return handle == null ? java.util.Optional.<com.cctv.contract.Frame>empty()
+                            : handle.latestFrame();
+                });
+                engineViews.put(cameraId, video);
+                DetectionOverlay overlay = new DetectionOverlay();
+                overlay.setManaged(false);
+                overlay.widthProperty().bind(video.widthProperty());
+                overlay.heightProperty().bind(video.heightProperty());
+                detectionOverlays.put(cameraId, overlay);
+                StackPane layer = new StackPane(video, overlay);
                 cell.setVideo(layer);
             }
             grid.add(cell, index % 2, index / 2);
@@ -601,11 +606,20 @@ public final class CamWatchmanApp extends Application {
             searchView.setObjectText(prefill);
         }
         searchView.runSearch();
-        root.setCenter(searchView);
+        // Keep the wall and its tool overlays mounted. Zones and the line editor are children
+        // of wallStack; replacing root.center with SearchView detached them from the scene,
+        // so their navigation buttons appeared to do nothing while Search was open.
+        if (!wallStack.getChildren().contains(searchView)) {
+            wallStack.getChildren().add(1, searchView);
+        }
+        searchView.toFront();
         searchView.requestFocus();
     }
 
     private void showWall() {
+        if (wallStack != null && searchView != null) {
+            wallStack.getChildren().remove(searchView);
+        }
         root.setCenter(wallStack);
     }
 
@@ -656,6 +670,8 @@ public final class CamWatchmanApp extends Application {
             lineEditor.close();
         }
         countsView.show();
+        countsView.toFront();
+        countsView.requestFocus();
     }
 
     /** Phase 7b: opens the counting-line editor on a frozen frame of one camera. */
@@ -682,6 +698,8 @@ public final class CamWatchmanApp extends Application {
             cameraManager.hide();
         }
         lineEditor.open(camera.id(), camera.name(), frame);
+        lineEditor.toFront();
+        lineEditor.requestFocus();
     }
 
     /**
@@ -762,7 +780,7 @@ public final class CamWatchmanApp extends Application {
         dataLabel.setStyle("-fx-text-fill:#6f6f6f; -fx-font-size:10px;");
         storageLabel = new Label("storage: starting…");
         storageLabel.setStyle("-fx-text-fill:#6f6f6f; -fx-font-size:10px;");
-        detectionLabel = new Label("rig: rig\\start-rig.ps1  ·  devices: no video yet (Phase 1a/6a)");
+        detectionLabel = new Label("AI: waiting for detections");
         detectionLabel.setStyle("-fx-text-fill:#4f4f4f; -fx-font-size:10px;");
         Label hint = detectionLabel;
 
@@ -783,8 +801,9 @@ public final class CamWatchmanApp extends Application {
      */
     /** Newest frame for one camera, used as the intrusion snapshot (engine tap or FFmpeg display cell). */
     private java.awt.image.BufferedImage snapshotForCamera(long cameraId) {
-        if (cameraId == engineCameraId && engineView != null) {
-            return engineView.snapshot().orElse(null);
+        EngineVideoView engineVideo = engineViews.get(cameraId);
+        if (engineVideo != null) {
+            return engineVideo.snapshot().orElse(null);
         }
         FfmpegDisplayView view = videoByCamera.get(cameraId);
         return view == null ? null : view.snapshotImage().orElse(null);
@@ -920,12 +939,46 @@ public final class CamWatchmanApp extends Application {
     }
 
     private void showStorageState() {
-        if (storageLabel == null) {
+        if (storageLabel == null || storageScheduler == null || storageScheduler.isShutdown()) {
             return;
         }
+        if (!storageRefreshPending.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            storageScheduler.execute(() -> {
+                StorageSnapshot snapshot = null;
+                try {
+                    snapshot = readStorageSnapshot();
+                } catch (RuntimeException failure) {
+                    log.warn("cannot refresh storage status: {}", failure.toString());
+                }
+                StorageSnapshot ready = snapshot;
+                try {
+                    Platform.runLater(() -> {
+                        try {
+                            if (ready != null) {
+                                applyStorageSnapshot(ready);
+                            }
+                        } finally {
+                            storageRefreshPending.set(false);
+                        }
+                    });
+                } catch (IllegalStateException toolkitStopped) {
+                    storageRefreshPending.set(false);
+                }
+            });
+        } catch (RejectedExecutionException shuttingDown) {
+            storageRefreshPending.set(false);
+        }
+    }
+
+    /** Reads disk and SQLite state on the storage worker, never on the JavaFX thread. */
+    private StorageSnapshot readStorageSnapshot() {
         long free = FreeSpace.usableBytes(config.recordingsDir());
         boolean allowed = retention.recordingAllowed();
         long used = 0;
+        boolean dbFailed = repository != null && repository.failure().isPresent();
         try (var connection = com.cctv.app.db.Database.open(config.databaseFile());
              var ps = connection.prepareStatement("SELECT COALESCE(SUM(size_bytes),0) FROM recordings WHERE status='ready'");
              var rs = ps.executeQuery()) {
@@ -933,12 +986,30 @@ public final class CamWatchmanApp extends Application {
                 used = rs.getLong(1);
             }
         } catch (java.sql.SQLException e) {
+            dbFailed = true;
             log.warn("cannot read stored bytes: {}", e.toString());
         }
-        storageLabel.setText(String.format("storage: %s clips · %.1f GB free%s",
-                bytesText(used), free / 1_073_741_824.0,
-                allowed ? "" : " · PAUSED (low disk)"));
-        storageLabel.setStyle("-fx-font-size:10px; -fx-text-fill:" + (allowed ? "#6f6f6f" : "#ff9d6b") + ";");
+        long dbDropped = repository == null ? 0 : repository.droppedCommandCount();
+        int dbQueued = repository == null ? 0 : repository.queueDepth();
+        return new StorageSnapshot(used, free, allowed, dbDropped, dbQueued, dbFailed);
+    }
+
+    /** Applies a previously read snapshot on the JavaFX thread. */
+    private void applyStorageSnapshot(StorageSnapshot snapshot) {
+        if (storageLabel == null) {
+            return;
+        }
+        String dbState = snapshot.databaseFailed() ? " · DB ERROR"
+                : snapshot.droppedCommands() > 0 ? " · DB WARN (" + snapshot.droppedCommands() + " dropped)"
+                : snapshot.queuedCommands() > 250 ? " · DB BUSY (" + snapshot.queuedCommands() + " queued)"
+                : " · DB OK";
+        storageLabel.setText(String.format("storage: %s clips · %.1f GB free%s%s",
+                bytesText(snapshot.usedBytes()), snapshot.freeBytes() / 1_073_741_824.0,
+                snapshot.recordingAllowed() ? "" : " · PAUSED (low disk)", dbState));
+        boolean healthy = snapshot.recordingAllowed() && !snapshot.databaseFailed()
+                && snapshot.droppedCommands() == 0 && snapshot.queuedCommands() <= 250;
+        storageLabel.setStyle("-fx-font-size:10px; -fx-text-fill:"
+                + (healthy ? "#6f6f6f" : "#ff9d6b") + ";");
     }
 
     private static String bytesText(long bytes) {
@@ -1098,23 +1169,19 @@ public final class CamWatchmanApp extends Application {
     }
 
     /**
-     * Starts the Camera 1 capture-to-AI pipeline on a background thread: model loading is
-     * synchronous (~1.6 s on the target laptop) and must never run on the JavaFX thread.
+     * Starts an independent capture/record/AI runtime for every enabled processing camera.
+     * Model loading stays off the JavaFX thread; one camera's failure does not block the others.
      */
     private void startEngine() {
-        CameraConfig camera = null;
-        for (var candidate : cameras()) {
-            if (candidate.hasMain() && (candidate.ai() || candidate.record())) {
-                camera = candidate;
-                break;
-            }
-        }
-        if (camera == null) {
-            log.info("engine not started: no camera needs a main stream");
+        List<CameraConfig> targets = cameras().stream()
+                .filter(camera -> camera.hasMain() && camera.needsMainStream())
+                .toList();
+        if (targets.isEmpty()) {
+            log.info("camera runtimes not started: no camera needs a main stream");
             return;
         }
-        CameraConfig target = camera;
-        Path model;
+        final long generation = engineGeneration.get();
+        final Path model;
         try {
             model = com.cctv.ai.ModelPathResolver.resolve(System.getProperty("cctv.model"),
                     Path.of(CamWatchmanApp.class.getProtectionDomain().getCodeSource()
@@ -1122,47 +1189,65 @@ public final class CamWatchmanApp extends Application {
                     Path.of(System.getProperty("user.dir")));
         } catch (Exception resolutionFailure) {
             log.error("could not resolve bundled AI model: {}", resolutionFailure.toString());
-            bus.publish(StreamStatusEvent.now(target.id(), StreamState.ERROR,
-                    "AI model unavailable: " + resolutionFailure.getClass().getSimpleName()));
+            for (CameraConfig target : targets) {
+                bus.publish(StreamStatusEvent.now(target.id(), StreamState.ERROR,
+                        "AI model unavailable: " + resolutionFailure.getClass().getSimpleName()));
+            }
             return;
         }
-        engineStart = Executors.newSingleThreadExecutor(runnable -> {
-            Thread thread = new Thread(runnable, "engine-start");
-            thread.setDaemon(true);
-            return thread;
-        });
+        if (engineStart == null || engineStart.isShutdown()) {
+            engineStart = Executors.newSingleThreadExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "camera-runtime-start");
+                thread.setDaemon(true);
+                return thread;
+            });
+        }
         engineStart.submit(() -> {
-            try {
-                EngineHandle created = EngineHandle.create(target.id(), target.mainUrl(), model,
-                        config.recordingsDir(), config.segmentSeconds(), target.record(), bus,
-                        config.aiRateFps(), countLines, zoneStore);
-                created.start();
-                pipeline = created;
-                engineCameraId = target.id();
-                log.info("engine started for camera {} '{}' ({} mode, ai {} fps, model {})", target.id(),
-                        target.name(), target.record() ? "record+ai" : "ai", config.aiRateFps(), model);
-                refreshOverlays();
-            } catch (Exception failure) {
-                log.error("engine failed to start for camera {}: {}", target.id(), failure.toString());
-                bus.publish(StreamStatusEvent.now(target.id(), StreamState.ERROR,
-                        "engine start failed: " + failure.getClass().getSimpleName()));
+            for (CameraConfig target : targets) {
+                if (engineGeneration.get() != generation || Thread.currentThread().isInterrupted()) {
+                    return;
+                }
+                EngineHandle created = null;
+                try {
+                    created = EngineHandle.create(target.id(), target.mainUrl(), model,
+                            config.recordingsDir(), config.segmentSeconds(), target.record(), target.ai(), bus,
+                            config.aiRateFps(), countLines, zoneStore);
+                    created.start();
+                    synchronized (runtimeLock) {
+                        if (engineGeneration.get() != generation || Thread.currentThread().isInterrupted()) {
+                            created.close();
+                            return;
+                        }
+                        EngineHandle replaced = pipelines.put(target.id(), created);
+                        if (replaced != null) {
+                            replaced.close();
+                        }
+                    }
+                    log.info("camera runtime started: camera {} '{}' (record={}, ai={}, {} fps)",
+                            target.id(), target.name(), target.record(), target.ai(), config.aiRateFps());
+                    refreshOverlays();
+                } catch (Exception failure) {
+                    if (created != null) {
+                        created.close();
+                    }
+                    log.error("camera runtime failed for camera {}: {}", target.id(), failure.toString());
+                    bus.publish(StreamStatusEvent.now(target.id(), StreamState.ERROR,
+                            "camera runtime start failed: " + failure.getClass().getSimpleName()));
+                }
             }
         });
     }
 
-    /** Paints the saved zones and counting lines of the pipeline camera on the live view (5c/7b). */
+    /** Refreshes zones and counting lines on each processing camera's own overlay. */
     private void refreshOverlays() {
-        if (detectionOverlay == null || engineCameraId < 0) {
-            return;
-        }
-        Runnable task = () -> {
+        Runnable task = () -> detectionOverlays.forEach((cameraId, overlay) -> {
             if (zoneStore != null) {
-                detectionOverlay.setZones(zoneStore.activeZones(engineCameraId));
+                overlay.setZones(zoneStore.activeZones(cameraId));
             }
             if (countLines != null) {
-                detectionOverlay.setLines(countLines.activeLines(engineCameraId));
+                overlay.setLines(countLines.activeLines(cameraId));
             }
-        };
+        });
         if (javafx.application.Platform.isFxApplicationThread()) {
             task.run();
         } else {
@@ -1175,7 +1260,7 @@ public final class CamWatchmanApp extends Application {
             return;
         }
         if (lastDetectionByClass.isEmpty()) {
-            detectionLabel.setText("devices: no video yet (Phase 1a/6a)");
+            detectionLabel.setText("AI: waiting for detections");
             return;
         }
         StringBuilder text = new StringBuilder("AI: ").append(detectionsSeen.get()).append(" detection(s)");
@@ -1190,19 +1275,19 @@ public final class CamWatchmanApp extends Application {
 
     @Override
     public void stop() {
-        if (pipeline != null) {
-            pipeline.close();
-            log.info("engine closed");
+        synchronized (runtimeLock) {
+            engineGeneration.incrementAndGet();
+            pipelines.values().forEach(EngineHandle::close);
+            pipelines.clear();
         }
+        log.info("camera runtimes closed");
         if (engineStart != null) {
             engineStart.shutdownNow();
         }
-        if (engineView != null) {
-            engineView.close();
-        }
-        if (detectionOverlay != null) {
-            detectionOverlay.close();
-        }
+        engineViews.values().forEach(EngineVideoView::close);
+        engineViews.clear();
+        detectionOverlays.values().forEach(DetectionOverlay::close);
+        detectionOverlays.clear();
         for (FfmpegDisplayView video : videoViews) {
             video.close();
         }
@@ -1268,7 +1353,7 @@ public final class CamWatchmanApp extends Application {
         // Until the engine exists, every camera reports OFFLINE with an honest reason.
         for (var camera : cameras()) {
             bus.publish(StreamStatusEvent.now(camera.id(), StreamState.OFFLINE,
-                    "waiting for engine (Phase 1a)"));
+                    "waiting for camera runtime"));
         }
     }
 

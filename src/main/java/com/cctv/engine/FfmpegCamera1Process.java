@@ -37,8 +37,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * One-process Camera 1 owner: FFmpeg opens the main RTSP input once, packet-copies it into
- * MKV segments, and decodes a low-rate 640x360 BGR output for the AI consumer.
+ * One-process per-camera owner: FFmpeg opens one main RTSP input, packet-copies it into
+ * MKV segments, and decodes 640x360 preview frames. The AI worker samples the latest frame at
+ * its configured inference cadence, independently of the smoother live display rate.
  *
  * <p>FFmpeg is resolved by {@link com.cctv.app.util.FfmpegBinary} (bundled copy first, then PATH).
  * The main RTSP URL may point straight at a camera (including user:password credentials) or at a
@@ -53,6 +54,7 @@ public final class FfmpegCamera1Process implements FrameSource {
     private static final int AI_WIDTH = 640;
     private static final int AI_HEIGHT = 360;
     private static final int FRAME_BYTES = AI_WIDTH * AI_HEIGHT * 3;
+    private static final double DISPLAY_FPS = 10.0;
     private static final long STALE_AFTER_MS = 3_000;
     private static final long MIN_RECONNECT_MS = 1_000;
     private static final long MAX_RECONNECT_MS = 15_000;
@@ -80,8 +82,9 @@ public final class FfmpegCamera1Process implements FrameSource {
     public FfmpegCamera1Process(long cameraId, String rtspUrl, Path recordingsDir,
                                 int segmentSeconds, double aiRateFps, EventBus events) {
         if (cameraId <= 0) throw new IllegalArgumentException("cameraId must be positive");
-        if (rtspUrl == null || !rtspUrl.regionMatches(true, 0, "rtsp://", 0, 7)) {
-            throw new IllegalArgumentException("main stream URL must use RTSP");
+        if (rtspUrl == null || !(rtspUrl.regionMatches(true, 0, "rtsp://", 0, 7)
+                || rtspUrl.regionMatches(true, 0, "rtsps://", 0, 8))) {
+            throw new IllegalArgumentException("main stream URL must use RTSP or RTSPS");
         }
         URI sourceUri = URI.create(rtspUrl);
         String host = sourceUri.getHost();
@@ -110,7 +113,7 @@ public final class FfmpegCamera1Process implements FrameSource {
     public void start() {
         if (closed.get()) throw new IllegalStateException("capture process is closed");
         if (!started.compareAndSet(false, true)) return;
-        publish(StreamState.CONNECTING, "Starting Camera 1 capture and recorder");
+        publish(StreamState.CONNECTING, "Starting camera capture and recorder");
         worker = new Thread(this::runLoop, "camera-" + cameraId + "-ffmpeg");
         worker.setDaemon(true);
         worker.start();
@@ -140,6 +143,10 @@ public final class FfmpegCamera1Process implements FrameSource {
         return t != null && t.isAlive() && !closed.get();
     }
 
+    static double previewFrameRate(double configuredAiRateFps) {
+        return Math.max(DISPLAY_FPS, configuredAiRateFps);
+    }
+
     private void runLoop() {
         long backoffMs = MIN_RECONNECT_MS;
         while (!closed.get()) {
@@ -161,12 +168,12 @@ public final class FfmpegCamera1Process implements FrameSource {
             latest.set(null);
             latestForDisplay.set(null);
             if (!closed.get()) {
-                publish(StreamState.RECONNECTING, "Camera 1 reconnecting");
+                publish(StreamState.RECONNECTING, "Camera stream reconnecting");
                 sleepWhileOpen(backoffMs);
                 backoffMs = Math.min(MAX_RECONNECT_MS, backoffMs * 2);
             }
         }
-        publish(StreamState.OFFLINE, "Camera 1 stopped");
+        publish(StreamState.OFFLINE, "Camera stream stopped");
     }
 
     private void runOneSession() throws Exception {
@@ -190,7 +197,7 @@ public final class FfmpegCamera1Process implements FrameSource {
                 "-segment_list_size", "0", "-segment_list_flags", "+live", template,
                 "-map", "0:v:0", "-vf", String.format(Locale.ROOT,
                         "fps=%.3f,scale=640:360:force_original_aspect_ratio=decrease,"
-                                + "pad=640:360:(ow-iw)/2:(oh-ih)/2,showinfo", aiRateFps),
+                                + "pad=640:360:(ow-iw)/2:(oh-ih)/2,showinfo", previewFrameRate(aiRateFps)),
                 "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"
         ));
 
@@ -246,7 +253,7 @@ public final class FfmpegCamera1Process implements FrameSource {
                 latest.set(frame);
                 latestForDisplay.set(frame);
                 if (online.compareAndSet(false, true)) {
-                    publish(StreamState.ONLINE, "Camera 1 online");
+                    publish(StreamState.ONLINE, "Camera stream online");
                 }
             }
         } catch (Exception failure) {

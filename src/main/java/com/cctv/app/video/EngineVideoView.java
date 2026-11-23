@@ -13,7 +13,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Camera 1 display path fed by the engine's non-destructive display tap
+ * Per-camera display path fed by the engine's non-destructive display tap
  * ({@link Camera1Pipeline#latestFrameAfter(long)}).
  *
  * <p>The image is copied on the JavaFX thread into a {@link WritableImage}; the engine keeps its own
@@ -120,6 +120,6 @@ public final class EngineVideoView extends Pane implements AutoCloseable {
             timer = null;
         }
         getChildren().clear();
-        log.info("camera 1 display link closed ({} frame(s) shown)", shownFrames);
+        log.info("engine display link closed ({} frame(s) shown)", shownFrames);
     }
 }

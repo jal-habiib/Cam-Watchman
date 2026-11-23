@@ -2,6 +2,7 @@ package com.cctv.app.ui;
 
 import com.cctv.app.db.SearchService;
 import java.awt.Desktop;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -19,6 +20,7 @@ import javafx.geometry.Pos;
 import javafx.scene.control.Button;
 import javafx.scene.control.DatePicker;
 import javafx.scene.control.Label;
+import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableView;
 import javafx.scene.control.TextField;
@@ -131,9 +133,33 @@ public final class SearchView extends BorderPane {
                 cell.getValue().file().getFileName().toString()));
         file.setPrefWidth(220);
 
-        table.getColumns().addAll(when, camera, length, objects, size, file);
+        TableColumn<SearchService.Hit, Void> action = new TableColumn<>("Playback");
+        action.setPrefWidth(92);
+        action.setMinWidth(92);
+        action.setSortable(false);
+        action.setCellFactory(column -> new TableCell<>() {
+            private final Button play = new Button("Play ▶");
+            {
+                play.setStyle(buttonStyle() + "-fx-background-color:#174b35;");
+                play.setOnAction(event -> {
+                    SearchService.Hit hit = getTableRow().getItem();
+                    if (hit != null) {
+                        play(hit);
+                    }
+                });
+            }
+            @Override
+            protected void updateItem(Void item, boolean empty) {
+                super.updateItem(item, empty);
+                setGraphic(empty ? null : play);
+            }
+        });
+
+        table.getColumns().addAll(when, camera, length, objects, size, file, action);
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
-        table.setPlaceholder(new Label("No kept clips until the engine finalizes recordings (4a)."));
+        Label empty = new Label("No clips match these filters. Try widening the date range or clearing the object filter.");
+        empty.setStyle("-fx-text-fill:#777; -fx-font-size:12px;");
+        table.setPlaceholder(empty);
         table.setRowFactory(view -> {
             javafx.scene.control.TableRow<SearchService.Hit> row =
                     new javafx.scene.control.TableRow<>();
@@ -149,7 +175,7 @@ public final class SearchView extends BorderPane {
 
     private VBox footer() {
         status.setStyle("-fx-text-fill:#7a7a7a; -fx-font-size:11px;");
-        Label hint = new Label("double-click a row to play it");
+        Label hint = new Label("Choose Play on a clip, or double-click its row to open it in your default video player.");
         hint.setStyle("-fx-text-fill:#4f4f4f; -fx-font-size:10px;");
         VBox box = new VBox(2, status, hint);
         box.setPadding(new Insets(8, 0, 0, 0));
@@ -167,8 +193,14 @@ public final class SearchView extends BorderPane {
 
     /** Runs the SQLite read off the FX thread, then fills the table on it. */
     public void runSearch() {
+        LocalDate from = fromPicker.getValue();
+        LocalDate to = toPicker.getValue();
+        if (from != null && to != null && from.isAfter(to)) {
+            status.setText("Invalid date range: the From date must be on or before the To date.");
+            return;
+        }
         SearchService.Query query = query();
-        status.setText("searching…");
+        status.setText("Searching clips…");
         Task<SearchService.Result> task = new Task<>() {
             @Override
             protected SearchService.Result call() throws Exception {
@@ -199,16 +231,29 @@ public final class SearchView extends BorderPane {
     }
 
     private void play(SearchService.Hit hit) {
+        // A retained clip can expire after the search query has populated the table.
+        // Recheck immediately before opening and refresh instead of leaving a dead result behind.
+        if (!Files.isRegularFile(hit.file())) {
+            status.setText("This clip is no longer available. Refreshing results…");
+            runSearch();
+            return;
+        }
         try {
             if (Desktop.isDesktopSupported()) {
                 Desktop.getDesktop().open(hit.file().toFile());
                 log.info("opened clip {} in the desktop player", hit.file());
             } else {
                 log.info("no desktop player; clip is at {}", hit.file());
+                status.setText("No desktop video player is available. Clip: " + hit.file());
             }
         } catch (Exception e) {
             log.warn("could not open {}: {}", hit.file(), e.toString());
-            status.setText("open failed: " + e.getMessage());
+            if (!Files.isRegularFile(hit.file())) {
+                status.setText("This clip is no longer available. Refreshing results…");
+                runSearch();
+            } else {
+                status.setText("open failed: " + e.getMessage());
+            }
         }
     }
 

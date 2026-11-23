@@ -14,9 +14,13 @@ import java.io.IOException;
 import java.nio.FloatBuffer;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * YOLO11 detector on ONNX Runtime (CPU).
@@ -28,7 +32,8 @@ import java.util.Optional;
  * {@code [1,3,H,W]} tensor and fails with an actionable message if it is not.
  *
  * <p>Inference is blocking: callers must not run it on the JavaFX thread (plan p.3 rule 2).
- * {@link OrtSession#run} is thread-safe; each call allocates its own input tensor.
+ * {@link OrtSession#run} is thread-safe; each call allocates its own input tensor. Camera workers
+ * using the same normalized model path and thread settings share one reference-counted session.
  */
 public final class YoloDetector implements AutoCloseable {
 
@@ -44,6 +49,40 @@ public final class YoloDetector implements AutoCloseable {
         }
     }
 
+    private record SessionKey(Path modelPath, int threads) { }
+
+    private static final Object SESSION_LOCK = new Object();
+    private static final Map<SessionKey, SharedSession> SHARED_SESSIONS = new HashMap<>();
+    // Four camera workers may submit frames together. Bound ONNX CPU work so inference cannot
+    // multiply its native thread pools by camera count and starve recording, decoding, or the UI.
+    private static final int MAX_CONCURRENT_INFERENCES = 2;
+    private static final Semaphore INFERENCE_SLOTS = new Semaphore(MAX_CONCURRENT_INFERENCES, true);
+    private static final AtomicInteger ACTIVE_INFERENCES = new AtomicInteger();
+    private static final AtomicInteger PEAK_INFERENCES = new AtomicInteger();
+
+    private static final class SharedSession {
+        final SessionKey key;
+        final OrtEnvironment env;
+        final OrtSession session;
+        final String inputName;
+        final int inputWidth;
+        final int inputHeight;
+        final long[] outputShape;
+        int references;
+
+        SharedSession(SessionKey key, OrtEnvironment env, OrtSession session, String inputName,
+                      int inputWidth, int inputHeight, long[] outputShape) {
+            this.key = key;
+            this.env = env;
+            this.session = session;
+            this.inputName = inputName;
+            this.inputWidth = inputWidth;
+            this.inputHeight = inputHeight;
+            this.outputShape = outputShape.clone();
+        }
+    }
+
+    private final SharedSession shared;
     private final OrtEnvironment env;
     private final OrtSession session;
     private final String inputName;
@@ -52,16 +91,16 @@ public final class YoloDetector implements AutoCloseable {
     private final long[] outputShape;
     private final float confThreshold;
     private final float nmsIou;
+    private final AtomicBoolean closed = new AtomicBoolean();
 
-    private YoloDetector(OrtEnvironment env, OrtSession session, String inputName,
-                         int inputWidth, int inputHeight, long[] outputShape,
-                         float confThreshold, float nmsIou) {
-        this.env = env;
-        this.session = session;
-        this.inputName = inputName;
-        this.inputWidth = inputWidth;
-        this.inputHeight = inputHeight;
-        this.outputShape = outputShape;
+    private YoloDetector(SharedSession shared, float confThreshold, float nmsIou) {
+        this.shared = shared;
+        this.env = shared.env;
+        this.session = shared.session;
+        this.inputName = shared.inputName;
+        this.inputWidth = shared.inputWidth;
+        this.inputHeight = shared.inputHeight;
+        this.outputShape = shared.outputShape.clone();
         this.confThreshold = confThreshold;
         this.nmsIou = nmsIou;
     }
@@ -88,58 +127,72 @@ public final class YoloDetector implements AutoCloseable {
             throw new IOException("model not found: " + modelPath
                     + " (expected models/yolo11n.onnx; see models/README.md)");
         }
+        SessionKey key = new SessionKey(modelPath.toAbsolutePath().normalize(), threads);
+        synchronized (SESSION_LOCK) {
+            SharedSession shared = SHARED_SESSIONS.get(key);
+            if (shared == null) {
+                shared = createSharedSession(key);
+                SHARED_SESSIONS.put(key, shared);
+            }
+            shared.references++;
+            return new YoloDetector(shared, confThreshold, nmsIou);
+        }
+    }
+
+    private static SharedSession createSharedSession(SessionKey key) throws OrtException {
         OrtEnvironment env = OrtEnvironment.getEnvironment();
         OrtSession.SessionOptions options = new OrtSession.SessionOptions();
-        if (threads > 0) {
-            options.setIntraOpNumThreads(threads);
+        if (key.threads() > 0) {
+            options.setIntraOpNumThreads(key.threads());
             options.setInterOpNumThreads(1);
         }
         options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT);
-        OrtSession session = env.createSession(modelPath.toString(), options);
-
-        String inputName = null;
-        long[] inputShape = null;
-        for (Map.Entry<String, ai.onnxruntime.NodeInfo> e : session.getInputInfo().entrySet()) {
-            if (e.getValue().getInfo() instanceof TensorInfo ti) {
-                inputName = e.getKey();
-                inputShape = ti.getShape();
-                break;
+        OrtSession session = env.createSession(key.modelPath().toString(), options);
+        try {
+            String inputName = null;
+            long[] inputShape = null;
+            for (Map.Entry<String, ai.onnxruntime.NodeInfo> entry : session.getInputInfo().entrySet()) {
+                if (entry.getValue().getInfo() instanceof TensorInfo tensorInfo) {
+                    inputName = entry.getKey();
+                    inputShape = tensorInfo.getShape();
+                    break;
+                }
             }
-        }
-        if (inputName == null || inputShape == null) {
-            session.close();
-            throw new IllegalArgumentException("model has no tensor input: " + modelPath);
-        }
-        if (inputShape.length != 4 || inputShape[1] != 3) {
-            session.close();
-            throw new IllegalArgumentException(
-                    "expected NCHW [1,3,H,W] input, model says "
-                            + java.util.Arrays.toString(inputShape));
-        }
-        if (inputShape[2] <= 0 || inputShape[3] <= 0) {
-            session.close();
-            throw new IllegalArgumentException(
-                    "model input is dynamic " + java.util.Arrays.toString(inputShape)
-                            + "; export a fixed imgsz (e.g. imgsz=320) so boxes map correctly");
-        }
-        int inputHeight = (int) inputShape[2];
-        int inputWidth = (int) inputShape[3];
-
-        long[] outputShape = null;
-        for (ai.onnxruntime.NodeInfo ni : session.getOutputInfo().values()) {
-            if (ni.getInfo() instanceof TensorInfo ti) {
-                outputShape = ti.getShape();
-                break;
+            if (inputName == null || inputShape == null) {
+                throw new IllegalArgumentException("model has no tensor input: " + key.modelPath());
             }
+            if (inputShape.length != 4 || inputShape[1] != 3) {
+                throw new IllegalArgumentException("expected NCHW [1,3,H,W] input, model says "
+                        + java.util.Arrays.toString(inputShape));
+            }
+            if (inputShape[2] <= 0 || inputShape[3] <= 0) {
+                throw new IllegalArgumentException("model input is dynamic "
+                        + java.util.Arrays.toString(inputShape)
+                        + "; export a fixed imgsz (e.g. imgsz=320) so boxes map correctly");
+            }
+            int inputHeight = (int) inputShape[2];
+            int inputWidth = (int) inputShape[3];
+            long[] outputShape = null;
+            for (ai.onnxruntime.NodeInfo nodeInfo : session.getOutputInfo().values()) {
+                if (nodeInfo.getInfo() instanceof TensorInfo tensorInfo) {
+                    outputShape = tensorInfo.getShape();
+                    break;
+                }
+            }
+            if (outputShape == null) {
+                throw new IllegalArgumentException("model has no tensor output: " + key.modelPath());
+            }
+            log.info("ONNX model {} input={} output={}", key.modelPath().getFileName(),
+                    java.util.Arrays.toString(inputShape), java.util.Arrays.toString(outputShape));
+            return new SharedSession(key, env, session, inputName, inputWidth, inputHeight, outputShape);
+        } catch (OrtException | RuntimeException failure) {
+            try {
+                session.close();
+            } catch (OrtException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+            throw failure;
         }
-        if (outputShape == null) {
-            session.close();
-            throw new IllegalArgumentException("model has no tensor output: " + modelPath);
-        }
-        log.info("ONNX model {} input={} output={}", modelPath.getFileName(),
-                java.util.Arrays.toString(inputShape), java.util.Arrays.toString(outputShape));
-        return new YoloDetector(env, session, inputName, inputWidth, inputHeight,
-                outputShape, confThreshold, nmsIou);
     }
 
     public int inputWidth() {
@@ -170,6 +223,9 @@ public final class YoloDetector implements AutoCloseable {
 
     /** Runs one frame and returns detections in normalized 0..1 coordinates of the frame. */
     public Inference detectTimed(BufferedImage image, long cameraId, long frameUtcMs) {
+        if (closed.get()) {
+            throw new IllegalStateException("detector is closed");
+        }
         if (image == null) {
             throw new IllegalArgumentException("image required");
         }
@@ -182,7 +238,7 @@ public final class YoloDetector implements AutoCloseable {
         long[] shape;
         try (OnnxTensor tensor = OnnxTensor.createTensor(env, FloatBuffer.wrap(pp.nchw()),
                 new long[] {1, 3, inputHeight, inputWidth})) {
-            try (OrtSession.Result result = session.run(Map.of(inputName, tensor))) {
+            try (OrtSession.Result result = runSession(tensor)) {
                 ai.onnxruntime.OnnxValue outputValue = result.get(0);
                 if (!(outputValue instanceof OnnxTensor out)) {
                     throw new IllegalStateException("model's first output is not a tensor");
@@ -214,12 +270,46 @@ public final class YoloDetector implements AutoCloseable {
         return detect(image, cameraId, System.currentTimeMillis());
     }
 
+    private OrtSession.Result runSession(OnnxTensor tensor) throws OrtException {
+        try {
+            INFERENCE_SLOTS.acquire();
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("interrupted while waiting for an AI inference slot", interrupted);
+        }
+        int active = ACTIVE_INFERENCES.incrementAndGet();
+        PEAK_INFERENCES.accumulateAndGet(active, Math::max);
+        try {
+            return session.run(Map.of(inputName, tensor));
+        } finally {
+            ACTIVE_INFERENCES.decrementAndGet();
+            INFERENCE_SLOTS.release();
+        }
+    }
+
+    static void resetPeakInferenceCountForTest() {
+        PEAK_INFERENCES.set(ACTIVE_INFERENCES.get());
+    }
+
+    static int peakInferenceCountForTest() {
+        return PEAK_INFERENCES.get();
+    }
+
     @Override
     public void close() {
-        try {
-            session.close();
-        } catch (OrtException e) {
-            log.warn("closing ONNX session failed", e);
+        if (!closed.compareAndSet(false, true)) {
+            return;
+        }
+        synchronized (SESSION_LOCK) {
+            shared.references--;
+            if (shared.references == 0) {
+                SHARED_SESSIONS.remove(shared.key, shared);
+                try {
+                    session.close();
+                } catch (OrtException e) {
+                    log.warn("closing shared ONNX session failed", e);
+                }
+            }
         }
         // OrtEnvironment is a process-wide singleton; leave it to the JVM.
     }

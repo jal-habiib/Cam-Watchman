@@ -15,6 +15,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,10 +23,10 @@ import org.slf4j.LoggerFactory;
 /**
  * The only writer of the {@code recordings}/{@code alerts} tables.
  *
- * <p>Publishers (engine listeners, UI actions) only enqueue; a single daemon thread opens the
+ * <p>Publishers (engine listeners, UI actions) enqueue; a single daemon thread opens the
  * connection, drains up to {@value #BATCH_SIZE} commands and commits them in one transaction.
- * The queue is bounded: if the disk stalls, {@link #segmentStarted} drops the command and logs
- * instead of blocking the caller (the plan forbids blocking the JavaFX thread).
+ * The queue is bounded and publishers never block the JavaFX thread. Any rejected command is
+ * counted and logged as an evidence-persistence failure rather than silently disappearing.
  */
 public final class RecordingRepository implements AutoCloseable {
 
@@ -37,6 +38,7 @@ public final class RecordingRepository implements AutoCloseable {
     private final BlockingQueue<DbCommand> queue = new ArrayBlockingQueue<>(QUEUE_CAPACITY);
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicReference<Throwable> failure = new AtomicReference<>();
+    private final AtomicLong droppedCommands = new AtomicLong();
     private final CountDownLatch stopped = new CountDownLatch(1);
     private final Thread writer;
     private volatile long written;
@@ -131,30 +133,64 @@ public final class RecordingRepository implements AutoCloseable {
 
     public long writtenCount() {
         return written;
-    }    public Optional<Throwable> failure() {
+    }
+
+    public long droppedCommandCount() {
+        return droppedCommands.get();
+    }
+
+    public int queueDepth() {
+        return queue.size();
+    }
+
+    public Optional<Throwable> failure() {
         return Optional.ofNullable(failure.get());
     }
 
     private void offer(DbCommand command) {
         if (!running.get()) {
+            long dropped = droppedCommands.incrementAndGet();
+            if (dropped == 1 || dropped % 100 == 0) {
+                log.error("database repository is closed - rejected {} command(s); latest {}", dropped, command);
+            }
+            return;
+        }
+        if (!writer.isAlive()) {
+            long dropped = droppedCommands.incrementAndGet();
+            if (dropped == 1 || dropped % 100 == 0) {
+                log.error("database writer is not running - rejected {} command(s); latest {}", dropped,
+                        command, failure.get());
+            }
             return;
         }
         if (!queue.offer(command)) {
-            log.warn("database queue full ({}) - dropping {}", QUEUE_CAPACITY, command);
+            long dropped = droppedCommands.incrementAndGet();
+            if (dropped == 1 || dropped % 100 == 0) {
+                log.error("database queue full ({}) - dropped {} command(s); latest {}", QUEUE_CAPACITY,
+                        dropped, command);
+            }
         }
     }
 
     /**
      * Blocks until everything enqueued before this call has been committed; used by tests and by
-     * the shutdown path. Returns false on timeout.
+     * the shutdown path. Returns false on timeout, a failed batch, or a concurrent queue drop.
      */
     public boolean flush(Duration timeout) {
-        CountDownLatch latch = new CountDownLatch(1);
-        if (!queue.offer(new Barrier(latch))) {
+        if (!writer.isAlive()) {
             return false;
         }
+        Barrier barrier = new Barrier(new CountDownLatch(1), new AtomicBoolean());
+        long droppedBefore = droppedCommands.get();
+        long timeoutNanos = Math.max(0L, timeout.toNanos());
+        long deadline = System.nanoTime() + timeoutNanos;
         try {
-            return latch.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            if (!queue.offer(barrier, timeoutNanos, TimeUnit.NANOSECONDS)) {
+                return false;
+            }
+            long remaining = Math.max(0L, deadline - System.nanoTime());
+            return barrier.latch().await(remaining, TimeUnit.NANOSECONDS)
+                    && barrier.committed().get() && droppedCommands.get() == droppedBefore;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;
@@ -162,16 +198,36 @@ public final class RecordingRepository implements AutoCloseable {
     }
 
     @Override
-    public void close() {
-        if (!running.compareAndSet(true, false)) {
+    public synchronized void close() {
+        if (!running.get()) {
             return;
         }
-        flush(Duration.ofSeconds(5));
-        writer.interrupt();
+        // Place the barrier while the writer is still accepting work; only then mark it closed.
+        // Otherwise the writer could observe an empty queue, exit, and miss a barrier added later.
+        boolean flushed = flush(Duration.ofSeconds(5));
+        running.set(false);
+        if (!flushed) {
+            log.error("database shutdown barrier did not confirm a clean commit; queue={} rejected={}",
+                    queue.size(), droppedCommands.get());
+        }
         try {
-            writer.join(Duration.ofSeconds(5));
+            // The writer drains the queue naturally after running=false. Do not interrupt it before
+            // this join: interrupting queue.poll() would abandon commands that are still pending.
+            writer.join(Duration.ofSeconds(10));
+            if (writer.isAlive()) {
+                log.error("database writer did not drain within 10 seconds; {} command(s) remain", queue.size());
+                writer.interrupt();
+                writer.join(Duration.ofSeconds(1));
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            log.error("interrupted while waiting for database writer shutdown; {} command(s) remain", queue.size());
+        }
+        if (!queue.isEmpty()) {
+            log.error("database shutdown left {} uncommitted command(s)", queue.size());
+        }
+        if (droppedCommands.get() > 0) {
+            log.error("database shutdown completed after rejecting {} command(s)", droppedCommands.get());
         }
         stopped.countDown();
     }
@@ -199,35 +255,73 @@ public final class RecordingRepository implements AutoCloseable {
         }
     }
 
+    private static final int MAX_BATCH_RETRIES = 3;
+
     private void executeBatch(Connection connection, List<DbCommand> batch) {
         List<Barrier> barriers = new ArrayList<>();
-        try {
-            connection.setAutoCommit(false);
-            for (DbCommand command : batch) {
-                if (command instanceof Barrier barrier) {
-                    barriers.add(barrier);
-                } else {
-                    command.apply(connection);
+        for (DbCommand command : batch) {
+            if (command instanceof Barrier barrier) {
+                barriers.add(barrier);
+            }
+        }
+
+        boolean committed = false;
+        int retries = 0;
+        while (!committed) {
+            try {
+                connection.setAutoCommit(false);
+                for (DbCommand command : batch) {
+                    if (!(command instanceof Barrier)) {
+                        command.apply(connection);
+                    }
+                }
+                connection.commit();
+                failure.set(null);
+                written += batch.size();
+                committed = true;
+            } catch (SQLException e) {
+                failure.set(e);
+                try {
+                    connection.rollback();
+                } catch (SQLException rollbackFailure) {
+                    e.addSuppressed(rollbackFailure);
+                }
+                if (retries >= MAX_BATCH_RETRIES) {
+                    long rejected = batch.stream().filter(command -> !(command instanceof Barrier)).count();
+                    droppedCommands.addAndGet(rejected);
+                    log.error("database batch permanently failed after {} attempt(s); {} metadata command(s) rejected",
+                            retries + 1, rejected, e);
+                    break;
+                }
+                long backoffMs = switch (retries) {
+                    case 0 -> 100L;
+                    case 1 -> 500L;
+                    default -> 1_500L;
+                };
+                retries++;
+                log.warn("database batch failed; retry {}/{} in {} ms: {}",
+                        retries, MAX_BATCH_RETRIES, backoffMs, e.toString());
+                try {
+                    Thread.sleep(backoffMs);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    long rejected = batch.stream().filter(command -> !(command instanceof Barrier)).count();
+                    droppedCommands.addAndGet(rejected);
+                    log.error("database batch interrupted during retry; {} metadata command(s) rejected",
+                            rejected, interrupted);
+                    break;
+                }
+            } finally {
+                try {
+                    connection.setAutoCommit(true);
+                } catch (SQLException resetFailure) {
+                    failure.set(resetFailure);
+                    log.warn("could not restore database auto-commit after batch: {}", resetFailure.toString());
                 }
             }
-            connection.commit();
-            written += batch.size();
-        } catch (SQLException e) {
-            failure.set(e);
-            log.error("database batch failed ({} commands) - rolled back", batch.size(), e);
-            try {
-                connection.rollback();
-            } catch (SQLException ignored) {
-                // the connection is already broken; the writer keeps going with the next batch
-            }
-        } finally {
-            try {
-                connection.setAutoCommit(true);
-            } catch (SQLException ignored) {
-                // ignore
-            }
-            barriers.forEach(Barrier::release);
         }
+        boolean result = committed;
+        barriers.forEach(barrier -> barrier.release(result));
     }
 
     // ------------------------------------------------------------------ commands
@@ -488,12 +582,14 @@ public final class RecordingRepository implements AutoCloseable {
         }
     }
 
-    private record Barrier(CountDownLatch latch) implements DbCommand {        @Override
+    private record Barrier(CountDownLatch latch, AtomicBoolean committed) implements DbCommand {
+        @Override
         public void apply(Connection connection) {
             // executed in the batch pass-through only
         }
 
-        void release() {
+        void release(boolean success) {
+            committed.set(success);
             latch.countDown();
         }
     }

@@ -60,6 +60,7 @@ public final class SearchService {
                            r.size_bytes, r.trigger_type
                       FROM recordings r
                      WHERE r.status = 'ready'
+                       AND r.trigger_type = 'detection'
                        AND r.start_utc >= ?
                        AND r.start_utc <= ?
                        AND (? = '' OR EXISTS (SELECT 1 FROM clip_labels l

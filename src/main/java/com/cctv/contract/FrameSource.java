@@ -3,7 +3,7 @@ package com.cctv.contract;
 import java.util.Optional;
 
 /**
- * The only way frames leave Camera 1's single RTSP connection (plan p.2, p.3 rule 1).
+ * The only way frames leave one camera's main RTSP connection.
  *
  * <p>Implementations keep a bounded handoff and drop stale frames rather than blocking the
  * decode loop. {@link #next()} therefore returns the newest fresh frame, or empty when none

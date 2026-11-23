@@ -10,7 +10,7 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 
-/** Camera 1 CPU inference consumer. */
+/** Per-camera CPU inference consumer. */
 public final class Camera1AiWorker implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(Camera1AiWorker.class);
     private static final long IDLE_PARK_NANOS = 5_000_000L;

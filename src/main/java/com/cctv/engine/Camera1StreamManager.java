@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Camera 1 capture owner. Exactly one FFmpegFrameGrabber is created per active session.
+ * Per-camera capture owner. Exactly one FFmpegFrameGrabber is created for this camera's active session.
  * The capture thread publishes only the newest 640x360 image through a one-slot handoff.
  * Consumers never touch the grabber and cannot stall the capture loop.
  */
@@ -44,7 +44,7 @@ public final class Camera1StreamManager implements FrameSource {
         this.cameraId = cameraId;
         this.mainUrl = Objects.requireNonNull(mainUrl, "mainUrl");
         if (!"rtsp".equalsIgnoreCase(mainUrl.getScheme())) {
-            throw new IllegalArgumentException("Camera 1 main URL must use RTSP");
+            throw new IllegalArgumentException("camera main URL must use RTSP");
         }
         this.events = Objects.requireNonNull(events, "events");
     }
@@ -53,8 +53,8 @@ public final class Camera1StreamManager implements FrameSource {
     public void start() {
         if (closed.get()) throw new IllegalStateException("stream manager is closed");
         if (!started.compareAndSet(false, true)) return;
-        publish(StreamState.CONNECTING, "Connecting to Camera 1");
-        worker = new Thread(this::runLoop, "camera-1-capture");
+        publish(StreamState.CONNECTING, "Connecting to camera " + cameraId);
+        worker = new Thread(this::runLoop, "camera-" + cameraId + "-capture");
         worker.setDaemon(true);
         worker.start();
     }
@@ -125,7 +125,7 @@ public final class Camera1StreamManager implements FrameSource {
                     if (!connected) {
                         connected = true;
                         backoffMs = MIN_RECONNECT_MS;
-                        publish(StreamState.ONLINE, "Camera 1 online");
+                        publish(StreamState.ONLINE, "Camera " + cameraId + " online");
                     }
                 }
             } catch (Exception failure) {
@@ -138,7 +138,7 @@ public final class Camera1StreamManager implements FrameSource {
                 }
             }
         }
-        publish(StreamState.OFFLINE, "Camera 1 stopped");
+        publish(StreamState.OFFLINE, "Camera " + cameraId + " stopped");
     }
 
     private static void configure(FFmpegFrameGrabber grabber) {

@@ -115,6 +115,40 @@ class RecordingRepositorySegmentTest {
         }
     }
 
+    @Test
+    void closeDrainsEveryAcceptedCommandEvenWhenQueueIsPressured() throws Exception {
+        int submitted = 3_000;
+        long base = 1_700_001_000_000L;
+        for (int i = 0; i < submitted; i++) {
+            long start = base + i * 20_000L;
+            repository.segmentFinalized(1, start, start + 15_000L, 1L,
+                    tmp.resolve("clip-" + i + ".mkv"), false);
+        }
+        long dropped = repository.droppedCommandCount();
+        assertTrue(dropped < submitted, "the writer should accept at least some segment metadata");
+
+        repository.close();
+
+        assertEquals(0, repository.queueDepth(), "shutdown must drain the accepted queue");
+        assertTrue(repository.failure().isEmpty(), "the database writer should finish without a fatal error");
+        try (Connection c = Database.open(dbFile); Statement s = c.createStatement();
+             ResultSet rs = s.executeQuery("SELECT COUNT(*) FROM recordings")) {
+            assertTrue(rs.next());
+            assertEquals(submitted - dropped, rs.getLong(1),
+                    "every command accepted by the bounded queue must be committed before close returns");
+        }
+    }
+
+    @Test
+    void commandsAfterCloseAreCountedAsRejected() {
+        repository.close();
+        long before = repository.droppedCommandCount();
+
+        repository.segmentStarted(1, 1_700_002_000_000L, tmp.resolve("after-close.mkv"));
+
+        assertEquals(before + 1, repository.droppedCommandCount());
+    }
+
     private record Row(String filePath, long endUtc, long sizeBytes, String triggerType, String status) {
     }
 

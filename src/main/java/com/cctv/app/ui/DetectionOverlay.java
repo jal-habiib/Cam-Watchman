@@ -12,8 +12,8 @@ import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
 
 /**
- * Draws the newest detection per object class over the Camera 1 video (plan 2d/6a), and — once the
- * engine publishes {@link TrackingUpdate} (plan 7a) — the tracked boxes with their stable id, e.g.
+ * Draws the newest detection per object class over this camera's video, and — once the
+ * engine publishes {@link TrackingUpdate} — the tracked boxes with their stable id, e.g.
  * {@code person #12}.
  *
  * <p>Detections are normalized; the canvas maps them onto its own size, so the overlay stays

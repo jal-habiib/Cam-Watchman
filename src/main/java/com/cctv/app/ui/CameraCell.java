@@ -13,8 +13,8 @@ import javafx.scene.layout.StackPane;
 import javafx.scene.layout.VBox;
 
 /**
- * One wall cell: camera name, stream/record badge and (for now) a placeholder until a video
- * surface is attached in Phase 1/6. Styling is inline so the cell has no stylesheet dependency.
+ * One wall cell: camera name, stream/record badge and the live video surface or its connection status.
+ * Styling is inline so the cell has no stylesheet dependency.
  */
 public final class CameraCell extends BorderPane {
 
@@ -25,9 +25,11 @@ public final class CameraCell extends BorderPane {
     private final Label nameLabel = new Label();
     private final Label badge = new Label("OFFLINE");
     private final Label placeholder = new Label();
+    private final Label statusDetail = new Label("Waiting for stream status…");
     private final StackPane videoArea = new StackPane();
     private StreamStatusEvent lastStatus;
     private boolean recording;
+    private boolean videoInstalled;
 
     public CameraCell(CameraConfig camera) {
         this.cameraId = camera.id();
@@ -37,6 +39,9 @@ public final class CameraCell extends BorderPane {
 
         nameLabel.setText(camera.name() + "  ·  " + camera.id());
         nameLabel.setStyle("-fx-text-fill:#e8e8e8; -fx-font-size:13px; -fx-font-weight:bold;");
+        nameLabel.setMinWidth(0);
+        nameLabel.setMaxWidth(Double.MAX_VALUE);
+        nameLabel.setEllipsisString("…");
 
         badge.setStyle(badgeStyle("#4a4a4a"));
         badge.setPadding(new Insets(2, 8, 2, 8));
@@ -49,16 +54,28 @@ public final class CameraCell extends BorderPane {
 
         placeholder.setText(camera.displayUrl() == null
                 ? "No stream URL configured"
-                : "No video yet — stream wiring lands with Phase 1a/6a");
-        placeholder.setStyle("-fx-text-fill:#6f6f6f; -fx-font-size:11px;");
+                : "Waiting for video frames…");
+        placeholder.setStyle("-fx-background-color:rgba(0,0,0,0.62); -fx-background-radius:6;"
+                + " -fx-padding:8 12; -fx-text-fill:#c5c5c5; -fx-font-size:11px;");
+        placeholder.setAlignment(Pos.CENTER);
+        placeholder.setWrapText(true);
+        placeholder.setMaxWidth(Double.MAX_VALUE);
+        placeholder.setMouseTransparent(true);
         videoArea.setStyle("-fx-background-color:#0b0b0b; -fx-background-radius:4;");
         videoArea.getChildren().add(placeholder);
         videoArea.setMinSize(160, 90);
 
         Label url = new Label(camera.displayUrl() == null ? "" : com.cctv.app.config.Redaction.redact(camera.displayUrl().toString()));
         url.setStyle("-fx-text-fill:#5a5a5a; -fx-font-size:10px;");
+        url.setMaxWidth(Double.MAX_VALUE);
+        url.setEllipsisString("…");
 
-        VBox below = new VBox(2, url);
+        statusDetail.setStyle("-fx-text-fill:#777; -fx-font-size:10px;");
+        statusDetail.setMaxWidth(Double.MAX_VALUE);
+        statusDetail.setWrapText(false);
+        statusDetail.setEllipsisString("…");
+
+        VBox below = new VBox(3, statusDetail, url);
         below.setPadding(new Insets(6, 0, 0, 0));
 
         setTop(header);
@@ -90,9 +107,24 @@ public final class CameraCell extends BorderPane {
         };
         badge.setText(recording ? text + " \u00b7 REC" : text);
         badge.setStyle(badgeStyle(recording ? "#b26a00" : colour));
-        if (status.detail() != null && !status.detail().isBlank()) {
-            placeholder.setText(status.detail());
-        }
+
+        String detail = status.detail() == null || status.detail().isBlank()
+                ? text.toLowerCase(java.util.Locale.ROOT)
+                : status.detail();
+        statusDetail.setText(detail);
+        String detailColour = switch (status.state()) {
+            case ONLINE -> "#78b987";
+            case CONNECTING -> "#a0a0a0";
+            case RECONNECTING -> "#e0b34f";
+            case OFFLINE -> "#999999";
+            case ERROR -> "#ed7777";
+        };
+        statusDetail.setStyle("-fx-text-fill:" + detailColour + "; -fx-font-size:10px;");
+        placeholder.setText(detail);
+        boolean showOverlay = !videoInstalled
+                || status.state() != com.cctv.contract.StreamState.ONLINE;
+        placeholder.setVisible(showOverlay);
+        placeholder.setManaged(showOverlay);
     }
 
     /** True while this camera is writing segments; drawn as an orange REC badge. */
@@ -114,18 +146,21 @@ public final class CameraCell extends BorderPane {
         return cameraId;
     }
 
-    /** Area a future video surface should be attached to. */
+    /** Area containing this camera's live video surface or connection placeholder. */
     public StackPane videoArea() {
         return videoArea;
     }
 
     /**
-     * Replaces the placeholder with a live video surface (the FFmpeg display cell for a
-     * display-only camera). Must be called on the FX thread.
+     * Replaces the placeholder with this camera's live video surface. Must be called on the FX thread.
      */
     public void setVideo(javafx.scene.Node video) {
-        videoArea.getChildren().clear();
-        videoArea.getChildren().add(video);
+        videoInstalled = true;
+        videoArea.getChildren().setAll(video, placeholder);
+        boolean showOverlay = lastStatus == null
+                || lastStatus.state() != com.cctv.contract.StreamState.ONLINE;
+        placeholder.setVisible(showOverlay);
+        placeholder.setManaged(showOverlay);
     }
 
     private static String badgeStyle(String colour) {
